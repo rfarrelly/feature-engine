@@ -1,11 +1,9 @@
-# file: data_file_index.py
-
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Iterable
 import re
 import pandas as pd
-
+import sys
 from rs import compute_historical_ppi
 
 
@@ -76,9 +74,6 @@ def group_by_league(files: Iterable[SeasonFile]) -> dict[str, List[SeasonFile]]:
 
 
 if __name__ == "__main__":
-    # Example usage:
-    #   python data_file_index.py /path/to/DATA/FBDUK
-    import sys
 
     if len(sys.argv) < 2:
         raise SystemExit("Usage: python data_file_index.py <root_dir>")
@@ -90,13 +85,11 @@ if __name__ == "__main__":
     for f in files:
         print(f"{f.league:25} {f.season:9} {f.path}")
 
-    # files = list_season_csvs(root_dir)
     ppi_results = []
     for f in files:
         print(f"Processing {f.league} - {f.season}")
         ppi_df = compute_historical_ppi(str(f.path))
         ppi_results.append(ppi_df)
 
-    output_path = "OUTPUT/historical_ppi.csv"
     all_historical_ppi = pd.concat(ppi_results)
-    all_historical_ppi.to_csv(output_path, index=False)
+    all_historical_ppi.to_csv("OUTPUT/historical_ppi.csv", index=False)
