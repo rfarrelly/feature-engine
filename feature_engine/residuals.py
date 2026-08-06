@@ -61,3 +61,13 @@ def get_no_vig_odds_multiway(odds: list):
             fair_odds.append(round(o**c, 3))
 
     return tuple(fair_odds)
+
+
+def compute_residuals(df: pd.DataFrame) -> pd.DataFrame:
+    no_vig_odds_cols = ["NoVigH", "NoVigD", "NoVigA"]
+
+    df[no_vig_odds_cols] = df[["B365CH", "B365CD", "B365CA"]].apply(
+        lambda row: get_no_vig_odds_multiway(row.tolist()), axis=1, result_type="expand"
+    )
+
+    return df

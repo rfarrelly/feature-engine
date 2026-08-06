@@ -5,6 +5,7 @@ import re
 import pandas as pd
 import sys
 from rs import compute_historical_ppi
+from residuals import compute_residuals
 
 
 @dataclass(frozen=True)
@@ -92,4 +93,5 @@ if __name__ == "__main__":
         ppi_results.append(ppi_df)
 
     all_historical_ppi = pd.concat(ppi_results)
+    all_historical_ppi = compute_residuals(all_historical_ppi)
     all_historical_ppi.to_csv("OUTPUT/historical_ppi.csv", index=False)
