@@ -2,29 +2,7 @@ from typing import Tuple
 
 import pandas as pd
 from add_games_played import add_home_away_gp
-
-
-# -------------------------
-# Helpers
-# -------------------------
-def get_points(g_for, g_against):
-    if g_for > g_against:
-        return 3
-    elif g_for == g_against:
-        return 1
-    else:
-        return 0
-
-
-def load_and_prepare_data(path):
-    df = pd.read_csv(path)
-    df["Date"] = pd.to_datetime(df["Date"])
-    df.sort_values("Date", inplace=True)
-    return df
-
-
-def get_all_teams(df):
-    return sorted(set(df["HomeTeam"]).union(set(df["AwayTeam"])))
+from residuals import get_points, get_all_teams, load_and_prepare_data
 
 
 # -------------------------
