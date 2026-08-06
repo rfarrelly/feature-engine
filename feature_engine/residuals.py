@@ -70,4 +70,10 @@ def compute_residuals(df: pd.DataFrame) -> pd.DataFrame:
         lambda row: get_no_vig_odds_multiway(row.tolist()), axis=1, result_type="expand"
     )
 
+    no_vig_prob_cols = ["NoVigPH", "NoVigPD", "NoVigPA"]
+
+    df[no_vig_prob_cols] = 1 / df[no_vig_odds_cols]
+    df["NoVigProbCheck"] = df[no_vig_prob_cols].sum(axis=1).round(2)
+    df[no_vig_prob_cols] = df[no_vig_prob_cols].round(2)
+
     return df
