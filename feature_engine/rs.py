@@ -91,33 +91,34 @@ def calculate_ppi_snapshot(games_so_far, team_ppgs, all_teams, current_date):
         opponent_strength_sum = 0
         opponent_count = 0
 
-        for _, row in team_games.iterrows():
-            if row["HomeTeam"] == team:
-                opponent = row["AwayTeam"]
-                opp_strength = team_ppgs[opponent]["Away_PPG"]
-            else:
-                opponent = row["HomeTeam"]
-                opp_strength = team_ppgs[opponent]["Home_PPG"]
+        if not team_games.empty:
+            for _, row in team_games.iterrows():
+                if row["HomeTeam"] == team:
+                    opponent = row["AwayTeam"]
+                    opp_strength = team_ppgs[opponent]["Away_PPG"]
+                else:
+                    opponent = row["HomeTeam"]
+                    opp_strength = team_ppgs[opponent]["Home_PPG"]
 
-            opponent_strength_sum += opp_strength
-            opponent_count += 1
+                opponent_strength_sum += opp_strength
+                opponent_count += 1
 
-        opp_ppg_avg = (
-            opponent_strength_sum / opponent_count if opponent_count > 0 else 0
-        )
+            opp_ppg_avg = (
+                opponent_strength_sum / opponent_count if opponent_count > 0 else 0
+            )
 
-        current_ppg = team_ppgs[team]["PPG"]
-        ppi = current_ppg * opp_ppg_avg
+            current_ppg = team_ppgs[team]["PPG"]
+            ppi = current_ppg * opp_ppg_avg
 
-        records.append(
-            {
-                "Date": current_date,
-                "Team": team,
-                "PPG": current_ppg,
-                "Opponent_PPG": opp_ppg_avg,
-                "PPI": ppi,
-            }
-        )
+            records.append(
+                {
+                    "Date": current_date,
+                    "Team": team,
+                    "PPG": current_ppg,
+                    "Opponent_PPG": opp_ppg_avg,
+                    "PPI": ppi,
+                }
+            )
 
     return records
 
