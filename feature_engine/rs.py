@@ -163,8 +163,6 @@ def merge_ppi_into_matches(df: pd.DataFrame, ppi_df: pd.DataFrame) -> pd.DataFra
         "AwayGP",
         "HomeTeam",
         "AwayTeam",
-        "FTHG",
-        "FTAG",
         "FTR",
         "B365CH",
         "B365CD",
