@@ -95,6 +95,7 @@ def compute_residuals(df: pd.DataFrame) -> pd.DataFrame:
     df["HomeResiduals"] = df["HomePoints"] - df["HomeEP"]
     df["AwayResiduals"] = df["AwayPoints"] - df["AwayEP"]
 
+    temp_res = []
     residual_stats = []
     for team in get_all_teams(df):
 
@@ -153,23 +154,24 @@ def compute_residuals(df: pd.DataFrame) -> pd.DataFrame:
             axis=1,
         )
 
-        print(res_df.shape[0])
+        residual_stats.append(res_df)
 
-        res_stats = {
-            "Team": team,
-            "Mean": res_df["Residuals"].mean(),
-            "Median": res_df["Residuals"].median(),
-            "Std": res_df["Residuals"].std(),
-            "Min": res_df["Residuals"].min(),
-            "Max": res_df["Residuals"].max(),
-        }
-        team_residual_stats_df = pd.DataFrame(res_stats, index=[0])
+        # res_stats = {
+        #     "Team": team,
+        #     "Mean": res_df["Residuals"].mean(),
+        #     "Median": res_df["Residuals"].median(),
+        #     "Std": res_df["Residuals"].std(),
+        #     "Min": res_df["Residuals"].min(),
+        #     "Max": res_df["Residuals"].max(),
+        # }
+        # team_residual_stats_df = pd.DataFrame(res_stats, index=[0])
 
-        residual_stats.append(team_residual_stats_df)
+        # residual_stats.append(team_residual_stats_df)
 
-    teams_residual_stats_df = pd.concat(residual_stats)
-    teams_residual_stats_df = teams_residual_stats_df.sort_values("Mean").to_dict(
-        orient="records"
+    teams_residual_stats_df = (
+        pd.concat(residual_stats)
+        .reset_index(drop=True)
+        .sort_values("Date", ascending=True)
     )
 
-    return df
+    return teams_residual_stats_df

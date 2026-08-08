@@ -222,5 +222,5 @@ def compute_ppi(
 
 
 def compute_historical_ppi(file_path: str) -> pd.DataFrame:
-    matches, ppi_shifted = compute_ppi(file_path, shift=True)
+    matches, ppi_shifted = compute_ppi(file_path, shift=False)
     return merge_ppi_into_matches(matches, ppi_shifted).dropna(how="any", axis="index")
