@@ -93,5 +93,4 @@ if __name__ == "__main__":
         ppi_results.append(ppi_df)
 
     all_historical_ppi = pd.concat(ppi_results)
-    all_historical_ppi = compute_residuals(all_historical_ppi)
     all_historical_ppi.to_csv("OUTPUT/historical_ppi.csv", index=False)

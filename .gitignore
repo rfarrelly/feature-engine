@@ -12,3 +12,4 @@ wheels/
 OUTPUT/
 
 .DS_Store
+residuals/
