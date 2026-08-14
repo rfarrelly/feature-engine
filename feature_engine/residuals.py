@@ -2,7 +2,7 @@ import math
 import pandas as pd
 
 # ---------------------------------------------------------------------
-# Basic match calculations
+# Match calculations
 # ---------------------------------------------------------------------
 
 
@@ -20,11 +20,6 @@ def expected_points(p_win, p_draw):
     return 3 * p_win + p_draw
 
 
-def residual(actual_points, expected_points):
-    """Actual points minus expected points."""
-    return actual_points - expected_points
-
-
 # ---------------------------------------------------------------------
 # Market calculations
 # ---------------------------------------------------------------------
@@ -32,40 +27,33 @@ def residual(actual_points, expected_points):
 
 def get_no_vig_odds_multiway(odds, accuracy=3):
     """
-    Convert bookmaker odds into no-vig/fair odds using the
-    Shin-style power transformation used in the original code.
+    Convert bookmaker odds into fair odds using the power
+    transformation used in the original analysis.
     """
     c = 1.0
-    target_overround = 0.0
-    max_error = (10 ** (-accuracy)) / 2
+    max_error = (10**-accuracy) / 2
     current_error = float("inf")
 
     while current_error > max_error:
-        f = -1 - target_overround
-
-        for odd in odds:
-            f += (1 / odd) ** c
+        f = -1 + sum((1 / odd) ** c for odd in odds)
 
         f_dash = sum((1 / odd) ** c * (-math.log(odd)) for odd in odds)
 
-        h = -f / f_dash
-        c += h
+        c -= f / f_dash
 
         total_probability = sum((1 / odd) ** c for odd in odds)
 
-        current_error = abs(total_probability - 1 - target_overround)
+        current_error = abs(total_probability - 1)
 
-    return tuple(round(odd**c, 6) for odd in odds)
+    return tuple(odd**c for odd in odds)
 
 
 def calculate_market_probabilities(df):
-    """
-    Add no-vig odds and probabilities to the match-level DataFrame.
-    """
+    """Add no-vig odds and probabilities to the match dataset."""
 
-    odds = df[["B365CH", "B365CD", "B365CA"]]
+    df = df.copy()
 
-    fair_odds = odds.apply(
+    fair_odds = df[["B365CH", "B365CD", "B365CA"]].apply(
         lambda row: get_no_vig_odds_multiway(row.tolist()),
         axis=1,
         result_type="expand",
@@ -73,7 +61,6 @@ def calculate_market_probabilities(df):
 
     fair_odds.columns = ["NoVigH", "NoVigD", "NoVigA"]
 
-    df = df.copy()
     df[["NoVigH", "NoVigD", "NoVigA"]] = fair_odds
 
     df["NoVigPH"] = 1 / df["NoVigH"]
@@ -84,15 +71,45 @@ def calculate_market_probabilities(df):
 
 
 # ---------------------------------------------------------------------
-# Match-level dataset
+# Residual definition
 # ---------------------------------------------------------------------
 
 
-def prepare_matches(df):
+def add_residual(df, definition="points"):
     """
-    Prepare the raw match-level DataFrame.
+    Add the chosen residual definition.
 
-    Does not filter by league, season, team or venue.
+    definitions:
+        points = actual points - expected points
+        win    = actual win indicator - win probability
+    """
+
+    df = df.copy()
+
+    if definition == "points":
+        df["Residual"] = df["ActualPoints"] - df["ExpectedPoints"]
+
+    elif definition == "win":
+        actual_win = (df["ActualPoints"] == 3).astype(int)
+        df["Residual"] = actual_win - df["WinProb"]
+
+    else:
+        raise ValueError(f"Unknown residual definition: {definition}")
+
+    return df
+
+
+# ---------------------------------------------------------------------
+# Build team-match dataset
+# ---------------------------------------------------------------------
+
+
+def build_team_match_dataset(df, residual_definition="points"):
+    """
+    Convert match-level data into a team-match dataset.
+
+    Each match produces two observations:
+    one for the home team and one for the away team.
     """
 
     df = df.copy()
@@ -100,6 +117,7 @@ def prepare_matches(df):
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.sort_values("Date").reset_index(drop=True)
 
+    # Match-level expected and actual points
     df["HomeEP"] = expected_points(
         df["NoVigPH"],
         df["NoVigPD"],
@@ -110,33 +128,9 @@ def prepare_matches(df):
         df["NoVigPD"],
     )
 
-    df["HomePoints"] = [get_points(hg, ag) for hg, ag in zip(df["FTHG"], df["FTAG"])]
+    df["HomePoints"] = [get_points(h, a) for h, a in zip(df["FTHG"], df["FTAG"])]
 
-    df["AwayPoints"] = [get_points(ag, hg) for hg, ag in zip(df["FTHG"], df["FTAG"])]
-
-    df["HomeGoalDifference"] = df["FTHG"] - df["FTAG"]
-    df["AwayGoalDifference"] = df["FTAG"] - df["FTHG"]
-
-    df["HomeResidual"] = df["HomePoints"] - df["HomeEP"]
-
-    df["AwayResidual"] = df["AwayPoints"] - df["AwayEP"]
-
-    return df
-
-
-# ---------------------------------------------------------------------
-# Team-match dataset
-# ---------------------------------------------------------------------
-
-
-def build_team_match_dataset(df):
-    """
-    Convert each match into two team-level observations.
-
-    One row = one team's experience of one match.
-
-    This is the main dataset used by the analysis module.
-    """
+    df["AwayPoints"] = [get_points(a, h) for h, a in zip(df["FTHG"], df["FTAG"])]
 
     home = pd.DataFrame(
         {
@@ -151,10 +145,6 @@ def build_team_match_dataset(df):
             "LossProb": df["NoVigPA"],
             "ExpectedPoints": df["HomeEP"],
             "ActualPoints": df["HomePoints"],
-            "GoalDifference": df["HomeGoalDifference"],
-            "GoalsFor": df["FTHG"],
-            "GoalsAgainst": df["FTAG"],
-            "Residual": df["HomeResidual"],
         }
     )
 
@@ -171,10 +161,6 @@ def build_team_match_dataset(df):
             "LossProb": df["NoVigPH"],
             "ExpectedPoints": df["AwayEP"],
             "ActualPoints": df["AwayPoints"],
-            "GoalDifference": df["AwayGoalDifference"],
-            "GoalsFor": df["FTAG"],
-            "GoalsAgainst": df["FTHG"],
-            "Residual": df["AwayResidual"],
         }
     )
 
@@ -189,9 +175,10 @@ def build_team_match_dataset(df):
 
     team_df["Match"] = team_df.groupby(["League", "Season", "Team"]).cumcount() + 1
 
-    team_df["ResBin"] = (team_df["Residual"] > 0).astype(int).replace({0: -1})
-
-    team_df["AbsResidual"] = team_df["Residual"].abs()
+    team_df = add_residual(
+        team_df,
+        definition=residual_definition,
+    )
 
     return team_df
 
@@ -201,46 +188,18 @@ def build_team_match_dataset(df):
 # ---------------------------------------------------------------------
 
 
-def add_residual_definition(df, name="points"):
-    """
-    Add a residual column according to the requested definition.
-    """
-
-    df = df.copy()
-
-    if name == "points":
-        df["Residual"] = df["ActualPoints"] - df["ExpectedPoints"]
-
-    elif name == "win":
-        actual_win = (df["ActualPoints"] == 3).astype(int)
-
-        df["Residual"] = actual_win - df["WinProb"]
-
-    else:
-        raise ValueError(f"Unknown residual definition: {name}")
-
-    return df
-
-
-def build_residual_dataset(path):
-    """
-    Load a raw football-data CSV and return the canonical
-    team-match residual dataset.
-    """
+def build_residual_dataset(path, residual_definition="points"):
+    """Load raw football-data CSV and build the canonical dataset."""
 
     df = pd.read_csv(path)
-    df[["B365CH", "B365CD", "B365CA"]] = df[["B365CH", "B365CD", "B365CA"]].astype(
-        float
-    )
+
+    odds_columns = ["B365CH", "B365CD", "B365CA"]
+
+    df[odds_columns] = df[odds_columns].astype(float)
 
     df = calculate_market_probabilities(df)
-    df = prepare_matches(df)
-    df = build_team_match_dataset(df)
-    df = add_residual_definition(df, "win")
 
-    return df
-
-
-df = build_residual_dataset(
-    "/Users/ryanfarrelly/Desktop/collector/DATA/football-data/Super-League-Greece/Super-League-Greece_2122.csv"
-)
+    return build_team_match_dataset(
+        df,
+        residual_definition=residual_definition,
+    )

@@ -1,222 +1,104 @@
-import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
-from pathlib import Path
 
-from residuals import build_residual_dataset
-
-DATA_DIR = Path("/Users/ryanfarrelly/Desktop/collector/DATA/football-data")
-
-OUTPUT_DIR = Path("residuals")
-
-# ---------------------------------------------------------------------
-# Filtering
-# ---------------------------------------------------------------------
+GROUPS = ["League", "Season", "Team"]
 
 
-def filter_data(
-    df,
-    league=None,
-    seasons=None,
-    teams=None,
-    venue=None,
-):
+def add_rolling_features(df, windows=(3, 5)):
     """
-    Flexible filtering for analysis.
+    Add lagged rolling residual statistics.
+
+    Rolling statistics only use matches BEFORE the current match.
     """
 
-    result = df.copy()
+    df = df.copy()
+    df = df.sort_values(GROUPS + ["Match"])
 
-    if league is not None:
-        result = result[result["League"] == league]
+    group = df.groupby(GROUPS)["Residual"]
 
-    if seasons is not None:
-        if not isinstance(seasons, (list, tuple, set)):
-            seasons = [seasons]
+    for window in windows:
 
-        result = result[result["Season"].isin(seasons)]
-
-    if teams is not None:
-        if not isinstance(teams, (list, tuple, set)):
-            teams = [teams]
-
-        result = result[result["Team"].isin(teams)]
-
-    if venue is not None:
-        if not isinstance(venue, (list, tuple, set)):
-            venue = [venue]
-
-        result = result[result["Venue"].isin(venue)]
-
-    return result.copy()
-
-
-# ---------------------------------------------------------------------
-# Descriptive statistics
-# ---------------------------------------------------------------------
-
-
-def residual_summary(df, group_by=None):
-    """
-    Summary statistics for residuals.
-
-    group_by can be:
-        None
-        "Team"
-        "Venue"
-        "Season"
-        "League"
-        ["League", "Season"]
-        etc.
-    """
-
-    if group_by is None:
-        return pd.DataFrame(
-            {
-                "Mean": [df["Residual"].mean()],
-                "Median": [df["Residual"].median()],
-                "Std": [df["Residual"].std()],
-                "Min": [df["Residual"].min()],
-                "Max": [df["Residual"].max()],
-                "N": [df["Residual"].count()],
-            }
+        # Recent residual level entering the current match
+        df[f"RollingMean_{window}"] = group.transform(
+            lambda x: x.shift(1).rolling(window).mean()
         )
 
-    return (
-        df.groupby(group_by)["Residual"]
-        .agg(
-            Mean="mean",
-            Median="median",
-            Std="std",
-            Min="min",
-            Max="max",
-            N="count",
+        # Recent residual volatility entering the current match
+        df[f"RollingStd_{window}"] = group.transform(
+            lambda x: x.shift(1).rolling(window).std()
         )
-        .reset_index()
-    )
+
+        # Current residual relative to recent residual distribution
+        df[f"ResidualZ_{window}"] = (df["Residual"] - df[f"RollingMean_{window}"]) / df[
+            f"RollingStd_{window}"
+        ]
+
+    return df
 
 
 # ---------------------------------------------------------------------
-# Plotting
+# Lag relationships
 # ---------------------------------------------------------------------
 
 
-def plot_team_residuals(
+def lag_correlation(df, lag=1):
+    """
+    Calculate pooled residual autocorrelation at a given lag.
+    """
+
+    df = df.sort_values(["League", "Season", "Team", "Match"]).copy()
+
+    previous = df.groupby(["League", "Season", "Team"])["Residual"].shift(lag)
+
+    valid = df["Residual"].notna() & previous.notna()
+
+    return df.loc[valid, "Residual"].corr(previous.loc[valid])
+
+
+# ---------------------------------------------------------------------
+# Signal → next-match outcome
+# ---------------------------------------------------------------------
+
+
+def evaluate_thresholds(
     df,
-    team,
-    league=None,
-    season=None,
-    venue=None,
+    z_column="ResidualZ_3",
+    thresholds=(-1.25, -1.0, -0.75, 0.75, 1.0, 1.25),
 ):
     """
-    Plot a team's residuals chronologically.
+    Evaluate whether unusually positive/negative recent residuals
+    predict the next residual.
     """
 
-    team_df = filter_data(
-        df,
-        league=league,
-        seasons=season,
-        teams=team,
-        venue=venue,
-    )
+    df = df.sort_values(["League", "Season", "Team", "Match"]).copy()
 
-    if team_df.empty:
-        raise ValueError(f"No data found for {team}")
-
-    team_df = team_df.sort_values("Date").reset_index(drop=True)
-
-    plt.figure(figsize=(12, 5))
-
-    plt.plot(
-        range(1, len(team_df) + 1),
-        team_df["Residual"],
-        marker="o",
-    )
-
-    plt.axhline(
-        0,
-        linestyle="--",
-        linewidth=1,
-    )
-
-    plt.title(f"{team} — Residuals")
-
-    plt.xlabel("Match")
-    plt.ylabel("Residual")
-
-    plt.tight_layout()
-    plt.show()
-
-
-# ---------------------------------------------------------------------
-# Autocorrelation
-# ---------------------------------------------------------------------
-
-
-def autocorrelation_by_group(
-    df,
-    group_by="Team",
-    max_lag=5,
-):
-    """
-    Calculate autocorrelation separately for each group.
-
-    Examples:
-        group_by="Team"
-        group_by=["League", "Team"]
-        group_by=["League", "Season", "Team"]
-    """
-
-    if isinstance(group_by, str):
-        group_by = [group_by]
+    df["NextResidual"] = df.groupby(["League", "Season", "Team"])["Residual"].shift(-1)
 
     results = []
 
-    for group_values, group_df in df.groupby(group_by):
+    for threshold in thresholds:
 
-        if not isinstance(group_values, tuple):
-            group_values = (group_values,)
+        if threshold < 0:
+            mask = df[z_column] < threshold
+            signal = f"Z < {threshold}"
+        else:
+            mask = df[z_column] > threshold
+            signal = f"Z > {threshold}"
 
-        group_df = group_df.sort_values("Date")
+        subset = df.loc[mask & df["NextResidual"].notna()]
 
-        row = dict(zip(group_by, group_values))
-
-        for lag in range(1, max_lag + 1):
-            row[f"Lag_{lag}"] = group_df["Residual"].autocorr(lag=lag)
-
-        results.append(row)
-
-    return pd.DataFrame(results)
-
-
-def pooled_autocorrelation(
-    df,
-    max_lag=5,
-):
-    """
-    Calculate pooled autocorrelation across all team sequences.
-
-    Lags are generated within each Team/Season combination.
-    """
-
-    df = df.sort_values(["League", "Season", "Team", "Date"]).copy()
-
-    results = []
-
-    for lag in range(1, max_lag + 1):
-
-        df[f"Lag_{lag}"] = df.groupby(["League", "Season", "Team"])["Residual"].shift(
-            lag
-        )
-
-        valid = df[["Residual", f"Lag_{lag}"]].dropna()
-
-        correlation = valid["Residual"].corr(valid[f"Lag_{lag}"])
+        if subset.empty:
+            continue
 
         results.append(
             {
-                "Lag": lag,
-                "Correlation": correlation,
-                "N": len(valid),
+                "Signal": signal,
+                "Threshold": threshold,
+                "N": len(subset),
+                "Mean_NextResidual": subset["NextResidual"].mean(),
+                "Median_NextResidual": subset["NextResidual"].median(),
+                "Positive_NextResidual_%": (subset["NextResidual"] > 0).mean(),
+                "Mean_CurrentZ": subset[z_column].mean(),
             }
         )
 
@@ -224,166 +106,87 @@ def pooled_autocorrelation(
 
 
 # ---------------------------------------------------------------------
-# Lagged dataset
+# Bootstrap confidence intervals
 # ---------------------------------------------------------------------
 
 
-def create_lagged_residuals(
-    df,
-    max_lag=5,
+def bootstrap_mean_ci(
+    values,
+    n_bootstrap=5000,
+    confidence=0.95,
+    random_state=42,
 ):
     """
-    Create lagged residual columns within each
-    league / season / team sequence.
+    Bootstrap confidence interval for a sample mean.
     """
 
-    result = df.sort_values(["League", "Season", "Team", "Date"]).copy()
+    values = np.asarray(values)
+    values = values[~np.isnan(values)]
 
-    group = result.groupby(["League", "Season", "Team"])["Residual"]
+    rng = np.random.default_rng(random_state)
 
-    for lag in range(1, max_lag + 1):
-        result[f"Residual_Lag_{lag}"] = group.shift(lag)
-
-    return result
-
-
-def nonlinear_residual_analysis(
-    df,
-    lag=1,
-    bins=5,
-):
-    """
-    Examine whether the next residual depends
-    nonlinearly on the previous residual.
-    """
-
-    data = df.sort_values(["League", "Season", "Team", "Date"]).copy()
-
-    data["PreviousResidual"] = data.groupby(["League", "Season", "Team"])[
-        "Residual"
-    ].shift(lag)
-
-    data = data.dropna(subset=["PreviousResidual", "Residual"]).copy()
-
-    data["ResidualBin"] = pd.qcut(
-        data["PreviousResidual"],
-        q=bins,
-        duplicates="drop",
+    bootstrap_means = np.array(
+        [
+            rng.choice(
+                values,
+                size=len(values),
+                replace=True,
+            ).mean()
+            for _ in range(n_bootstrap)
+        ]
     )
 
-    result = (
-        data.groupby("ResidualBin", observed=True)["Residual"]
-        .agg(
-            MeanNextResidual="mean",
-            MedianNextResidual="median",
-            N="count",
-        )
-        .reset_index()
-    )
-
-    return result
-
-
-def residual_magnitude_analysis(
-    df,
-    lag=1,
-    bins=5,
-):
-    data = create_lagged_residuals(
-        df,
-        max_lag=lag,
-    )
-
-    lag_column = f"Residual_Lag_{lag}"
-
-    data = data.dropna(subset=[lag_column, "Residual"]).copy()
-
-    data["PreviousMagnitude"] = data[lag_column].abs()
-
-    data["MagnitudeBin"] = pd.qcut(
-        data["PreviousMagnitude"],
-        q=bins,
-        duplicates="drop",
-    )
+    alpha = 1 - confidence
 
     return (
-        data.groupby("MagnitudeBin", observed=True)["Residual"]
-        .agg(
-            MeanNextResidual="mean",
-            MedianNextResidual="median",
-            N="count",
-        )
-        .reset_index()
+        np.quantile(bootstrap_means, alpha / 2),
+        np.quantile(bootstrap_means, 1 - alpha / 2),
     )
 
 
-from pathlib import Path
-import pandas as pd
+def add_confidence_intervals(
+    results,
+    df,
+    z_column="ResidualZ_3",
+    confidence=0.95,
+):
+    """
+    Add bootstrap confidence intervals to threshold results.
+    """
 
+    df = df.sort_values(["League", "Season", "Team", "Match"]).copy()
 
-def load_all_residuals(directory="residuals"):
-    files = Path(directory).glob("*/*.csv")
+    df["NextResidual"] = df.groupby(["League", "Season", "Team"])["Residual"].shift(-1)
 
-    frames = [pd.read_csv(file) for file in files]
+    lower = []
+    upper = []
 
-    return pd.concat(
-        frames,
-        ignore_index=True,
-    )
+    for _, row in results.iterrows():
 
+        threshold = row["Threshold"]
 
-def process_all_leagues():
-    for csv_file in DATA_DIR.glob("*/*.csv"):
+        if threshold < 0:
+            mask = df[z_column] < threshold
+        else:
+            mask = df[z_column] > threshold
 
-        league = csv_file.parent.name
-        season = csv_file.stem
+        values = df.loc[
+            mask & df["NextResidual"].notna(),
+            "NextResidual",
+        ]
 
-        print(f"Processing {league} — {season}")
-
-        result = build_residual_dataset(csv_file)
-
-        output_dir = OUTPUT_DIR / league
-        output_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        output_path = output_dir / f"{season}.csv"
-
-        result.to_csv(
-            output_path,
-            index=False,
+        lo, hi = bootstrap_mean_ci(
+            values,
+            confidence=confidence,
         )
 
+        lower.append(lo)
+        upper.append(hi)
 
-if __name__ == "__main__":
-    process_all_leagues()
-    df = load_all_residuals()
+    results = results.copy()
 
-    bundesliga = filter_data(
-        df,
-        league="Bundesliga",
-    )
+    results["CI_Lower"] = lower
+    results["CI_Upper"] = upper
+    results["CI_Excludes_Zero"] = (results["CI_Lower"] > 0) | (results["CI_Upper"] < 0)
 
-    bundesliga_2526 = filter_data(
-        df,
-        league="Bundesliga",
-        seasons=2526,
-    )
-
-    home = filter_data(
-        df,
-        venue="home",
-    )
-
-    greece = filter_data(
-        df,
-        league="Super-League-Greece",
-    )
-
-    bayern = filter_data(
-        df,
-        league="Bundesliga",
-        teams="Bayern Munich",
-    )
-    breakpoint()
+    return results
