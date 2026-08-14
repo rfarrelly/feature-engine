@@ -3,16 +3,16 @@ from pathlib import Path
 import pandas as pd
 
 from residuals import build_residual_dataset
+
 from analysis import (
     add_rolling_features,
     evaluate_thresholds,
     add_confidence_intervals,
+    identify_episodes,
+    summarize_episodes,
+    measure_episode_outcomes,
+    summarize_episode_performance,
 )
-
-# ---------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------
-
 
 DATA_DIR = Path("/Users/ryanfarrelly/Desktop/collector/DATA/football-data")
 
@@ -20,21 +20,17 @@ OUTPUT_DIR = Path("residuals")
 
 
 # ---------------------------------------------------------------------
-# Residual dataset handling
+# Build residual datasets
 # ---------------------------------------------------------------------
 
 
 def load_all_residuals(directory="residuals"):
-    """
-    Load all previously generated team-match residual datasets.
-    """
-
-    files = sorted(Path(directory).glob("*/*.csv"))
-
-    if not files:
-        raise FileNotFoundError(f"No residual CSV files found in {directory}")
+    files = Path(directory).glob("*/*.csv")
 
     frames = [pd.read_csv(file) for file in files]
+
+    if not frames:
+        raise FileNotFoundError(f"No residual CSV files found in {directory}")
 
     return pd.concat(
         frames,
@@ -43,22 +39,14 @@ def load_all_residuals(directory="residuals"):
 
 
 def process_all_leagues():
-    """
-    Build the canonical residual dataset for every
-    league/season CSV in DATA_DIR.
-    """
-
-    for csv_file in sorted(DATA_DIR.glob("*/*.csv")):
+    for csv_file in DATA_DIR.glob("*/*.csv"):
 
         league = csv_file.parent.name
         season = csv_file.stem
 
         print(f"Processing {league} — {season}")
 
-        result = build_residual_dataset(
-            csv_file,
-            residual_definition="points",
-        )
+        result = build_residual_dataset(csv_file)
 
         output_dir = OUTPUT_DIR / league
 
@@ -76,103 +64,149 @@ def process_all_leagues():
 
 
 # ---------------------------------------------------------------------
-# Analysis
+# Load data
 # ---------------------------------------------------------------------
 
 
-def analyse_dataset(df):
-    """
-    Add team-history signals and evaluate
-    the next-match relationship.
-    """
-
-    df = add_rolling_features(
-        df,
-        windows=(3, 5),
-    )
-
-    # ---------------------------------------------------------------
-    # Overall
-    # ---------------------------------------------------------------
-
-    overall = evaluate_thresholds(
-        df,
-        z_column="RollingZ_3",
-    )
-
-    overall = add_confidence_intervals(
-        overall,
-        df,
-        z_column="RollingZ_3",
-    )
-
-    # ---------------------------------------------------------------
-    # Home
-    # ---------------------------------------------------------------
-
-    home = df[df["Venue"] == "home"].copy()
-
-    home_results = evaluate_thresholds(
-        home,
-        z_column="RollingZ_3",
-    )
-
-    home_results = add_confidence_intervals(
-        home_results,
-        home,
-        z_column="RollingZ_3",
-    )
-
-    # ---------------------------------------------------------------
-    # Away
-    # ---------------------------------------------------------------
-
-    away = df[df["Venue"] == "away"].copy()
-
-    away_results = evaluate_thresholds(
-        away,
-        z_column="RollingZ_3",
-    )
-
-    away_results = add_confidence_intervals(
-        away_results,
-        away,
-        z_column="RollingZ_3",
-    )
-
-    return (
-        df,
-        overall,
-        home_results,
-        away_results,
-    )
+df = load_all_residuals(directory="residuals")
 
 
 # ---------------------------------------------------------------------
-# Main
+# Rolling team history
 # ---------------------------------------------------------------------
 
 
-if __name__ == "__main__":
+df = add_rolling_features(
+    df,
+    windows=(3, 5),
+)
 
-    # Uncomment this when the raw datasets need rebuilding.
-    #
-    # process_all_leagues()
 
-    df = load_all_residuals(directory=OUTPUT_DIR)
+# ---------------------------------------------------------------------
+# Existing pooled threshold analysis
+# ---------------------------------------------------------------------
 
-    (
-        df,
-        overall,
-        home_results,
-        away_results,
-    ) = analyse_dataset(df)
 
-    print("\nOVERALL")
-    print(overall.to_string(index=False))
+results = evaluate_thresholds(
+    df,
+    z_column="ResidualZ_3",
+)
 
-    print("\nHOME")
-    print(home_results.to_string(index=False))
+results = add_confidence_intervals(
+    results,
+    df,
+    z_column="ResidualZ_3",
+)
 
-    print("\nAWAY")
-    print(away_results.to_string(index=False))
+
+print("\nOVERALL")
+print(results)
+
+
+# ---------------------------------------------------------------------
+# Home / away threshold analysis
+# ---------------------------------------------------------------------
+
+
+home = df[df["Venue"] == "home"].copy()
+
+away = df[df["Venue"] == "away"].copy()
+
+
+home_results = evaluate_thresholds(
+    home,
+    z_column="ResidualZ_3",
+)
+
+home_results = add_confidence_intervals(
+    home_results,
+    home,
+    z_column="ResidualZ_3",
+)
+
+
+away_results = evaluate_thresholds(
+    away,
+    z_column="ResidualZ_3",
+)
+
+away_results = add_confidence_intervals(
+    away_results,
+    away,
+    z_column="ResidualZ_3",
+)
+
+
+print("\nHOME")
+print(home_results)
+
+print("\nAWAY")
+print(away_results)
+
+
+# ---------------------------------------------------------------------
+# Episode detection
+# ---------------------------------------------------------------------
+
+
+df = identify_episodes(
+    df,
+    z_column="ResidualZ_3",
+    positive_threshold=1.25,
+    negative_threshold=-1.25,
+)
+
+
+# ---------------------------------------------------------------------
+# Episode summaries
+# ---------------------------------------------------------------------
+
+
+episodes = summarize_episodes(
+    df,
+    z_column="ResidualZ_3",
+)
+
+
+# ---------------------------------------------------------------------
+# Forward episode outcomes
+# ---------------------------------------------------------------------
+
+
+episode_outcomes = measure_episode_outcomes(
+    df,
+    episodes,
+    horizons=(1, 2, 3, 5),
+)
+
+
+# ---------------------------------------------------------------------
+# Aggregate episode performance
+# ---------------------------------------------------------------------
+
+
+episode_results = summarize_episode_performance(
+    episode_outcomes,
+    horizons=(1, 2, 3, 5),
+)
+
+
+print("\nEPISODE PERFORMANCE")
+print(episode_results)
+
+
+# ---------------------------------------------------------------------
+# Save episode-level data
+# ---------------------------------------------------------------------
+
+
+episodes.to_csv(
+    "episode_summary.csv",
+    index=False,
+)
+
+episode_outcomes.to_csv(
+    "episode_outcomes.csv",
+    index=False,
+)
+breakpoint()
