@@ -8,15 +8,19 @@ import pandas as pd
 
 def get_points(goals_for, goals_against):
     """Return league points from a match result."""
+
     if goals_for > goals_against:
         return 3
+
     if goals_for == goals_against:
         return 1
+
     return 0
 
 
 def expected_points(p_win, p_draw):
     """Expected league points from win/draw probabilities."""
+
     return 3 * p_win + p_draw
 
 
@@ -30,11 +34,14 @@ def get_no_vig_odds_multiway(odds, accuracy=3):
     Convert bookmaker odds into fair odds using the power
     transformation used in the original analysis.
     """
+
     c = 1.0
+
     max_error = (10**-accuracy) / 2
     current_error = float("inf")
 
     while current_error > max_error:
+
         f = -1 + sum((1 / odd) ** c for odd in odds)
 
         f_dash = sum((1 / odd) ** c * (-math.log(odd)) for odd in odds)
@@ -53,13 +60,23 @@ def calculate_market_probabilities(df):
 
     df = df.copy()
 
-    fair_odds = df[["B365CH", "B365CD", "B365CA"]].apply(
+    odds_columns = [
+        "B365CH",
+        "B365CD",
+        "B365CA",
+    ]
+
+    fair_odds = df[odds_columns].apply(
         lambda row: get_no_vig_odds_multiway(row.tolist()),
         axis=1,
         result_type="expand",
     )
 
-    fair_odds.columns = ["NoVigH", "NoVigD", "NoVigA"]
+    fair_odds.columns = [
+        "NoVigH",
+        "NoVigD",
+        "NoVigA",
+    ]
 
     df[["NoVigH", "NoVigD", "NoVigA"]] = fair_odds
 
@@ -79,21 +96,27 @@ def add_residual(df, definition="points"):
     """
     Add the chosen residual definition.
 
-    definitions:
-        points = actual points - expected points
-        win    = actual win indicator - win probability
+    points:
+        ActualPoints - ExpectedPoints
+
+    win:
+        ActualWin - WinProbability
     """
 
     df = df.copy()
 
     if definition == "points":
+
         df["Residual"] = df["ActualPoints"] - df["ExpectedPoints"]
 
     elif definition == "win":
+
         actual_win = (df["ActualPoints"] == 3).astype(int)
+
         df["Residual"] = actual_win - df["WinProb"]
 
     else:
+
         raise ValueError(f"Unknown residual definition: {definition}")
 
     return df
@@ -104,7 +127,10 @@ def add_residual(df, definition="points"):
 # ---------------------------------------------------------------------
 
 
-def build_team_match_dataset(df, residual_definition="points"):
+def build_team_match_dataset(
+    df,
+    residual_definition="points",
+):
     """
     Convert match-level data into a team-match dataset.
 
@@ -115,9 +141,13 @@ def build_team_match_dataset(df, residual_definition="points"):
     df = df.copy()
 
     df["Date"] = pd.to_datetime(df["Date"])
+
     df = df.sort_values("Date").reset_index(drop=True)
 
+    # ---------------------------------------------------------------
     # Match-level expected and actual points
+    # ---------------------------------------------------------------
+
     df["HomeEP"] = expected_points(
         df["NoVigPH"],
         df["NoVigPD"],
@@ -128,9 +158,25 @@ def build_team_match_dataset(df, residual_definition="points"):
         df["NoVigPD"],
     )
 
-    df["HomePoints"] = [get_points(h, a) for h, a in zip(df["FTHG"], df["FTAG"])]
+    df["HomePoints"] = [
+        get_points(h, a)
+        for h, a in zip(
+            df["FTHG"],
+            df["FTAG"],
+        )
+    ]
 
-    df["AwayPoints"] = [get_points(a, h) for h, a in zip(df["FTHG"], df["FTAG"])]
+    df["AwayPoints"] = [
+        get_points(a, h)
+        for h, a in zip(
+            df["FTHG"],
+            df["FTAG"],
+        )
+    ]
+
+    # ---------------------------------------------------------------
+    # Home observations
+    # ---------------------------------------------------------------
 
     home = pd.DataFrame(
         {
@@ -148,6 +194,10 @@ def build_team_match_dataset(df, residual_definition="points"):
         }
     )
 
+    # ---------------------------------------------------------------
+    # Away observations
+    # ---------------------------------------------------------------
+
     away = pd.DataFrame(
         {
             "Date": df["Date"],
@@ -164,14 +214,23 @@ def build_team_match_dataset(df, residual_definition="points"):
         }
     )
 
+    # ---------------------------------------------------------------
+    # Team-level dataset
+    # ---------------------------------------------------------------
+
     team_df = pd.concat(
         [home, away],
         ignore_index=True,
     )
 
-    team_df = team_df.sort_values(["League", "Season", "Team", "Date"]).reset_index(
-        drop=True
-    )
+    team_df = team_df.sort_values(
+        [
+            "League",
+            "Season",
+            "Team",
+            "Date",
+        ]
+    ).reset_index(drop=True)
 
     team_df["Match"] = team_df.groupby(["League", "Season", "Team"]).cumcount() + 1
 
@@ -188,12 +247,22 @@ def build_team_match_dataset(df, residual_definition="points"):
 # ---------------------------------------------------------------------
 
 
-def build_residual_dataset(path, residual_definition="points"):
-    """Load raw football-data CSV and build the canonical dataset."""
+def build_residual_dataset(
+    path,
+    residual_definition="points",
+):
+    """
+    Load raw football-data CSV and build
+    the canonical team-match dataset.
+    """
 
     df = pd.read_csv(path)
 
-    odds_columns = ["B365CH", "B365CD", "B365CA"]
+    odds_columns = [
+        "B365CH",
+        "B365CD",
+        "B365CA",
+    ]
 
     df[odds_columns] = df[odds_columns].astype(float)
 
