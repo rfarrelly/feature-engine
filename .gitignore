@@ -13,3 +13,4 @@ OUTPUT/
 
 .DS_Store
 residuals/
+*.csv

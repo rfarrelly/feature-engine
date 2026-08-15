@@ -6,12 +6,12 @@ from residuals import build_residual_dataset
 
 from analysis import (
     add_rolling_features,
-    evaluate_thresholds,
-    add_confidence_intervals,
     identify_episodes,
     summarize_episodes,
     measure_episode_outcomes,
     summarize_episode_performance,
+    summarize_forward_residuals,
+    compare_episode_signals,
 )
 
 DATA_DIR = Path("/Users/ryanfarrelly/Desktop/collector/DATA/football-data")
@@ -64,7 +64,7 @@ def process_all_leagues():
 
 
 # ---------------------------------------------------------------------
-# Load data
+# Load existing residual datasets
 # ---------------------------------------------------------------------
 
 
@@ -72,80 +72,18 @@ df = load_all_residuals(directory="residuals")
 
 
 # ---------------------------------------------------------------------
-# Rolling team history
+# Build signal
 # ---------------------------------------------------------------------
 
 
 df = add_rolling_features(
     df,
-    windows=(3, 5),
+    windows=(3,),
 )
 
 
 # ---------------------------------------------------------------------
-# Existing pooled threshold analysis
-# ---------------------------------------------------------------------
-
-
-results = evaluate_thresholds(
-    df,
-    z_column="ResidualZ_3",
-)
-
-results = add_confidence_intervals(
-    results,
-    df,
-    z_column="ResidualZ_3",
-)
-
-
-print("\nOVERALL")
-print(results)
-
-
-# ---------------------------------------------------------------------
-# Home / away threshold analysis
-# ---------------------------------------------------------------------
-
-
-home = df[df["Venue"] == "home"].copy()
-
-away = df[df["Venue"] == "away"].copy()
-
-
-home_results = evaluate_thresholds(
-    home,
-    z_column="ResidualZ_3",
-)
-
-home_results = add_confidence_intervals(
-    home_results,
-    home,
-    z_column="ResidualZ_3",
-)
-
-
-away_results = evaluate_thresholds(
-    away,
-    z_column="ResidualZ_3",
-)
-
-away_results = add_confidence_intervals(
-    away_results,
-    away,
-    z_column="ResidualZ_3",
-)
-
-
-print("\nHOME")
-print(home_results)
-
-print("\nAWAY")
-print(away_results)
-
-
-# ---------------------------------------------------------------------
-# Episode detection
+# Identify extreme episodes
 # ---------------------------------------------------------------------
 
 
@@ -158,7 +96,7 @@ df = identify_episodes(
 
 
 # ---------------------------------------------------------------------
-# Episode summaries
+# Summarize episodes
 # ---------------------------------------------------------------------
 
 
@@ -168,8 +106,12 @@ episodes = summarize_episodes(
 )
 
 
+print("\nEPISODE SUMMARY")
+print(episodes.head())
+
+
 # ---------------------------------------------------------------------
-# Forward episode outcomes
+# Measure forward outcomes
 # ---------------------------------------------------------------------
 
 
@@ -180,14 +122,19 @@ episode_outcomes = measure_episode_outcomes(
 )
 
 
+print("\nEPISODE OUTCOMES")
+print(episode_outcomes.head())
+
+
 # ---------------------------------------------------------------------
-# Aggregate episode performance
+# Clustered episode performance
 # ---------------------------------------------------------------------
 
 
 episode_results = summarize_episode_performance(
     episode_outcomes,
     horizons=(1, 2, 3, 5),
+    n_bootstrap=5000,
 )
 
 
@@ -196,7 +143,55 @@ print(episode_results)
 
 
 # ---------------------------------------------------------------------
-# Save episode-level data
+# Exact forward residuals
+# ---------------------------------------------------------------------
+
+
+forward_results = summarize_forward_residuals(
+    episode_outcomes,
+    horizons=(1, 2, 3, 5),
+)
+
+
+print("\nEPISODE FORWARD RESIDUALS")
+print(forward_results)
+
+
+# ---------------------------------------------------------------------
+# Direct positive-vs-negative comparison
+# ---------------------------------------------------------------------
+
+
+comparison_results = compare_episode_signals(
+    episode_outcomes,
+    horizons=(1, 2, 3, 5),
+    n_bootstrap=5000,
+)
+
+
+print("\nPOSITIVE VS NEGATIVE")
+print(comparison_results)
+
+
+# ---------------------------------------------------------------------
+# Episode diagnostics
+# ---------------------------------------------------------------------
+
+
+print("\nEPISODE LENGTH")
+
+print(episodes.groupby("EpisodeSignal")["Length"].describe())
+
+
+print("\nEPISODES PER TEAM-SEASON")
+
+episode_counts = episodes.groupby(["League", "Season", "Team"]).size()
+
+print(episode_counts.describe())
+
+
+# ---------------------------------------------------------------------
+# Save analysis datasets
 # ---------------------------------------------------------------------
 
 
@@ -210,42 +205,17 @@ episode_outcomes.to_csv(
     index=False,
 )
 
-print("\nEPISODE FORWARD RESIDUALS")
+episode_results.to_csv(
+    "episode_performance.csv",
+    index=False,
+)
 
-forward_results = []
+forward_results.to_csv(
+    "episode_forward_residuals.csv",
+    index=False,
+)
 
-for signal in ["positive", "negative"]:
-
-    subset = episode_outcomes[episode_outcomes["EpisodeSignal"] == signal]
-
-    for horizon in [1, 2, 3, 5]:
-
-        column = f"Residual_{horizon}"
-
-        values = subset[column].dropna()
-
-        forward_results.append(
-            {
-                "Signal": signal,
-                "MatchAhead": horizon,
-                "N": len(values),
-                "MeanResidual": values.mean(),
-                "MedianResidual": values.median(),
-                "Positive_%": (values > 0).mean(),
-            }
-        )
-
-forward_results = pd.DataFrame(forward_results)
-
-print(forward_results)
-
-print("\nEPISODE LENGTH")
-
-print(episodes.groupby("EpisodeSignal")["Length"].describe())
-
-print("\nEPISODES PER TEAM-SEASON")
-
-episode_counts = episodes.groupby(["League", "Season", "Team"]).size()
-
-print(episode_counts.describe())
-breakpoint()
+comparison_results.to_csv(
+    "episode_signal_comparison.csv",
+    index=False,
+)
