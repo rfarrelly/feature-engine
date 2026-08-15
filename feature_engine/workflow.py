@@ -209,4 +209,43 @@ episode_outcomes.to_csv(
     "episode_outcomes.csv",
     index=False,
 )
+
+print("\nEPISODE FORWARD RESIDUALS")
+
+forward_results = []
+
+for signal in ["positive", "negative"]:
+
+    subset = episode_outcomes[episode_outcomes["EpisodeSignal"] == signal]
+
+    for horizon in [1, 2, 3, 5]:
+
+        column = f"Residual_{horizon}"
+
+        values = subset[column].dropna()
+
+        forward_results.append(
+            {
+                "Signal": signal,
+                "MatchAhead": horizon,
+                "N": len(values),
+                "MeanResidual": values.mean(),
+                "MedianResidual": values.median(),
+                "Positive_%": (values > 0).mean(),
+            }
+        )
+
+forward_results = pd.DataFrame(forward_results)
+
+print(forward_results)
+
+print("\nEPISODE LENGTH")
+
+print(episodes.groupby("EpisodeSignal")["Length"].describe())
+
+print("\nEPISODES PER TEAM-SEASON")
+
+episode_counts = episodes.groupby(["League", "Season", "Team"]).size()
+
+print(episode_counts.describe())
 breakpoint()
