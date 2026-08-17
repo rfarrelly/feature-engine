@@ -1,166 +1,198 @@
+# workflow.py
+
 from pathlib import Path
 
 import pandas as pd
 
 from analysis import (
-    add_rolling_features,
-    identify_episodes,
-    summarize_episodes,
-    measure_episode_outcomes,
-    summarize_episode_performance,
-    summarize_forward_residuals,
-    compare_episode_signals,
+    add_rolling_residuals,
+    identify_residual_runs,
+    build_runs,
+    measure_run_outcomes,
+    summarize_run_response,
+    aggregate_team_seasons,
+    run_parameter_grid,
 )
+
+# ---------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------
 
 RESIDUAL_DIR = Path("residuals")
 
+ROLLING_WINDOWS = (3, 5, 8)
+
+RUN_WINDOWS = (3, 5, 8)
+
+RUN_THRESHOLDS = (
+    0.25,
+    0.50,
+    0.75,
+    1.00,
+)
+
 HORIZONS = (1, 2, 3, 5)
 
-Z_COLUMN = "ResidualZ_3"
-
-POSITIVE_THRESHOLD = 1.25
-NEGATIVE_THRESHOLD = -1.25
+MIN_RUNS = 3
 
 N_BOOTSTRAP = 5000
 
+SEED = 42
 
-def load_all_residuals(directory=RESIDUAL_DIR):
-    """
-    Load all previously generated team-match residual datasets.
-    """
 
-    files = Path(directory).glob("*/*.csv")
+# ---------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------
+
+
+def load_all_residuals(
+    directory: Path = RESIDUAL_DIR,
+) -> pd.DataFrame:
+
+    files = sorted(Path(directory).glob("*/*.csv"))
+
+    if not files:
+        raise FileNotFoundError(f"No residual CSV files found in {directory}")
 
     frames = [pd.read_csv(file) for file in files]
 
-    if not frames:
-        raise FileNotFoundError(f"No residual CSV files found in {directory}")
-
-    return pd.concat(
+    df = pd.concat(
         frames,
         ignore_index=True,
     )
 
+    df["Date"] = pd.to_datetime(df["Date"])
 
-def run_analysis():
+    return df
 
-    # ---------------------------------------------------------------
-    # Load residual data
-    # ---------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# Main analysis
+# ---------------------------------------------------------------------
+
+
+def run_analysis() -> dict[str, pd.DataFrame]:
 
     df = load_all_residuals()
 
     # ---------------------------------------------------------------
-    # Build rolling signal
+    # Rolling residual history
     # ---------------------------------------------------------------
 
-    df = add_rolling_features(
+    df = add_rolling_residuals(
         df,
-        windows=(3,),
+        windows=ROLLING_WINDOWS,
     )
 
     # ---------------------------------------------------------------
-    # Identify extreme episodes
+    # Baseline configuration
     # ---------------------------------------------------------------
 
-    df = identify_episodes(
+    signalled = identify_residual_runs(
         df,
-        z_column=Z_COLUMN,
-        positive_threshold=POSITIVE_THRESHOLD,
-        negative_threshold=NEGATIVE_THRESHOLD,
+        window=5,
+        threshold=0.50,
     )
 
-    # ---------------------------------------------------------------
-    # Episode-level dataset
-    # ---------------------------------------------------------------
-
-    episodes = summarize_episodes(
-        df,
-        z_column=Z_COLUMN,
+    runs = build_runs(
+        signalled,
+        window=5,
     )
 
-    # ---------------------------------------------------------------
-    # Forward outcomes
-    # ---------------------------------------------------------------
-
-    episode_outcomes = measure_episode_outcomes(
-        df,
-        episodes,
+    outcomes = measure_run_outcomes(
+        signalled,
+        runs,
         horizons=HORIZONS,
     )
 
-    # ---------------------------------------------------------------
-    # Episode performance
-    # ---------------------------------------------------------------
-
-    episode_performance = summarize_episode_performance(
-        episode_outcomes,
+    response = summarize_run_response(
+        outcomes,
         horizons=HORIZONS,
         n_bootstrap=N_BOOTSTRAP,
+        seed=SEED,
+    )
+
+    team_seasons = aggregate_team_seasons(
+        outcomes,
+        horizons=HORIZONS,
+        min_runs=MIN_RUNS,
     )
 
     # ---------------------------------------------------------------
-    # Individual forward residuals
+    # Parameter sensitivity
     # ---------------------------------------------------------------
 
-    forward_residuals = summarize_forward_residuals(
-        episode_outcomes,
+    sensitivity = run_parameter_grid(
+        df,
+        windows=RUN_WINDOWS,
+        thresholds=RUN_THRESHOLDS,
         horizons=HORIZONS,
-    )
-
-    # ---------------------------------------------------------------
-    # Positive vs negative comparison
-    # ---------------------------------------------------------------
-
-    signal_comparison = compare_episode_signals(
-        episode_outcomes,
-        horizons=HORIZONS,
+        min_runs=MIN_RUNS,
         n_bootstrap=N_BOOTSTRAP,
+        seed=SEED,
     )
 
     return {
-        "episodes": episodes,
-        "episode_outcomes": episode_outcomes,
-        "episode_performance": episode_performance,
-        "forward_residuals": forward_residuals,
-        "signal_comparison": signal_comparison,
+        "runs": runs,
+        "outcomes": outcomes,
+        "response": response,
+        "team_seasons": team_seasons,
+        "sensitivity": sensitivity,
     }
+
+
+# ---------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------
+
+
+def save_results(
+    results: dict[str, pd.DataFrame],
+) -> None:
+
+    outputs = {
+        "runs": "residual_runs.csv",
+        "outcomes": "residual_run_outcomes.csv",
+        "response": "residual_run_response.csv",
+        "team_seasons": "team_season_responses.csv",
+        "sensitivity": "parameter_sensitivity.csv",
+    }
+
+    for key, filename in outputs.items():
+
+        results[key].to_csv(
+            filename,
+            index=False,
+        )
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
 
 
 if __name__ == "__main__":
 
     results = run_analysis()
 
-    print("\nEPISODE PERFORMANCE")
-    print(results["episode_performance"])
+    print("\nOVERALL RUN RESPONSE")
+    print(results["response"].to_string(index=False))
 
-    print("\nPOSITIVE VS NEGATIVE")
-    print(results["signal_comparison"])
-
-    print("\nEPISODE FORWARD RESIDUALS")
-    print(results["forward_residuals"])
-
-    results["episodes"].to_csv(
-        "episode_summary.csv",
-        index=False,
+    print("\nTOP TEAM-SEASON RESPONSES")
+    print(
+        results["team_seasons"]
+        .sort_values(
+            "MeanResidual",
+            ascending=False,
+        )
+        .head(50)
+        .to_string(index=False)
     )
 
-    results["episode_outcomes"].to_csv(
-        "episode_outcomes.csv",
-        index=False,
-    )
+    print("\nPARAMETER SENSITIVITY")
+    print(results["sensitivity"].to_string(index=False))
 
-    results["episode_performance"].to_csv(
-        "episode_performance.csv",
-        index=False,
-    )
+    print("\nRUN COUNTS")
+    print(results["runs"].groupby("RunSignal").size())
 
-    results["forward_residuals"].to_csv(
-        "episode_forward_residuals.csv",
-        index=False,
-    )
-
-    results["signal_comparison"].to_csv(
-        "episode_signal_comparison.csv",
-        index=False,
-    )
+    save_results(results)

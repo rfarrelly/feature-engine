@@ -1,89 +1,147 @@
+# analysis.py
+
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
-GROUPS = ["League", "Season", "Team"]
-
-
 # ---------------------------------------------------------------------
-# Rolling residual signal
+# Rolling residuals
 # ---------------------------------------------------------------------
 
 
-def add_rolling_features(df, windows=(3,)):
+def add_rolling_residuals(
+    df: pd.DataFrame,
+    windows: tuple[int, ...] = (3, 5, 8),
+) -> pd.DataFrame:
     """
-    Calculate rolling residual statistics using only matches
-    before the current match.
+    Add trailing residual statistics.
+
+    The current match is excluded.
+
+    History resets for each League / Season / Team.
     """
 
-    df = df.copy().sort_values(GROUPS + ["Match"])
+    df = df.copy()
 
-    group = df.groupby(GROUPS)["Residual"]
+    group_cols = ["League", "Season", "Team"]
+
+    df["Date"] = pd.to_datetime(df["Date"])
+
+    df = df.sort_values(group_cols + ["Date", "Match"]).reset_index(drop=True)
+
+    grouped = df.groupby(
+        group_cols,
+        sort=False,
+    )["Residual"]
 
     for window in windows:
 
-        df[f"RollingMean_{window}"] = group.transform(
-            lambda x: x.shift(1).rolling(window).mean()
+        prior = grouped.shift(1)
+
+        rolling = prior.groupby(
+            [
+                df["League"],
+                df["Season"],
+                df["Team"],
+            ],
+            sort=False,
+        ).rolling(
+            window=window,
+            min_periods=window,
         )
 
-        df[f"RollingStd_{window}"] = group.transform(
-            lambda x: x.shift(1).rolling(window).std()
+        df[f"ResidualMean_{window}"] = (
+            rolling.mean().reset_index(level=group_cols, drop=True).to_numpy()
         )
 
-        df[f"ResidualZ_{window}"] = (df["Residual"] - df[f"RollingMean_{window}"]) / df[
-            f"RollingStd_{window}"
-        ]
+        df[f"ResidualStd_{window}"] = (
+            rolling.std(ddof=1).reset_index(level=group_cols, drop=True).to_numpy()
+        )
+
+        df[f"ResidualSum_{window}"] = (
+            rolling.sum().reset_index(level=group_cols, drop=True).to_numpy()
+        )
+
+        std = df[f"ResidualStd_{window}"].replace(0, np.nan)
+
+        df[f"ResidualZ_{window}"] = df[f"ResidualMean_{window}"] / std
 
     return df
 
 
 # ---------------------------------------------------------------------
-# Episode identification
+# Residual runs
 # ---------------------------------------------------------------------
 
 
-def identify_episodes(
-    df,
-    z_column="ResidualZ_3",
-    positive_threshold=1.25,
-    negative_threshold=-1.25,
-):
+def identify_residual_runs(
+    df: pd.DataFrame,
+    window: int = 5,
+    threshold: float = 0.50,
+) -> pd.DataFrame:
     """
-    Identify consecutive runs of extreme positive or negative signals.
+    Identify positive and negative residual runs.
 
-    A new episode begins when:
-        - an extreme signal starts after no signal, or
-        - the signal changes from positive to negative or vice versa.
+    Signal is based only on residual history before the current match.
     """
 
-    df = df.copy().sort_values(GROUPS + ["Match"]).reset_index(drop=True)
+    df = df.copy()
 
-    signal = df[z_column]
+    signal_column = f"ResidualMean_{window}"
 
-    df["EpisodeSignal"] = np.select(
-        [
-            signal > positive_threshold,
-            signal < negative_threshold,
-        ],
-        [
-            "positive",
-            "negative",
-        ],
-        default=None,
+    if signal_column not in df.columns:
+        raise ValueError(
+            f"{signal_column} not found. " "Run add_rolling_residuals() first."
+        )
+
+    df["RunSignal"] = pd.Series(
+        pd.NA,
+        index=df.index,
+        dtype="string",
     )
 
-    previous = df.groupby(GROUPS)["EpisodeSignal"].shift(1)
+    df.loc[
+        df[signal_column] >= threshold,
+        "RunSignal",
+    ] = "positive"
 
-    episode_start = df["EpisodeSignal"].notna() & (
-        previous.isna() | (df["EpisodeSignal"] != previous)
+    df.loc[
+        df[signal_column] <= -threshold,
+        "RunSignal",
+    ] = "negative"
+
+    group_cols = [
+        "League",
+        "Season",
+        "Team",
+    ]
+
+    previous = df.groupby(
+        group_cols,
+        sort=False,
+    )[
+        "RunSignal"
+    ].shift(1)
+
+    new_run = df["RunSignal"].notna() & (previous.isna() | df["RunSignal"].ne(previous))
+
+    run_number = (
+        new_run.astype(int)
+        .groupby(
+            [
+                df["League"],
+                df["Season"],
+                df["Team"],
+            ],
+            sort=False,
+        )
+        .cumsum()
     )
 
-    df["EpisodeNumber"] = (
-        episode_start.astype(int).groupby([df[group] for group in GROUPS]).cumsum()
-    )
-
-    df["EpisodeID"] = np.where(
-        df["EpisodeSignal"].notna(),
-        df["EpisodeNumber"],
+    df["RunID"] = np.where(
+        df["RunSignal"].notna(),
+        run_number,
         np.nan,
     )
 
@@ -91,452 +149,451 @@ def identify_episodes(
 
 
 # ---------------------------------------------------------------------
-# Episode summary
+# Run construction
 # ---------------------------------------------------------------------
 
 
-def summarize_episodes(df, z_column="ResidualZ_3"):
+def build_runs(
+    df: pd.DataFrame,
+    window: int = 5,
+) -> pd.DataFrame:
     """
-    Create one row per extreme episode.
+    Create one row per residual run.
     """
 
-    qualifying = df.loc[df["EpisodeSignal"].notna() & df["EpisodeID"].notna()].copy()
+    required = [
+        "League",
+        "Season",
+        "Team",
+        "Match",
+        "RunID",
+        "RunSignal",
+        f"ResidualMean_{window}",
+    ]
 
-    if qualifying.empty:
-        return pd.DataFrame()
+    missing = [column for column in required if column not in df.columns]
 
-    summary = qualifying.groupby(
-        GROUPS + ["EpisodeID", "EpisodeSignal"],
-        as_index=False,
-    ).agg(
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    data = df[df["RunID"].notna()].copy()
+
+    if data.empty:
+        return pd.DataFrame(
+            columns=[
+                "League",
+                "Season",
+                "Team",
+                "RunID",
+                "RunSignal",
+                "StartMatch",
+                "EndMatch",
+                "Length",
+                "EntrySignal",
+                "MeanSignal",
+                "PeakSignal",
+            ]
+        )
+
+    group_cols = [
+        "League",
+        "Season",
+        "Team",
+        "RunID",
+    ]
+
+    signal = f"ResidualMean_{window}"
+
+    grouped = data.groupby(
+        group_cols,
+        sort=False,
+    )
+
+    result = grouped.agg(
+        RunSignal=("RunSignal", "first"),
         StartMatch=("Match", "min"),
         EndMatch=("Match", "max"),
         Length=("Match", "size"),
-        MeanSignal=(z_column, "mean"),
-    )
+        EntrySignal=(signal, "first"),
+        MeanSignal=(signal, "mean"),
+    ).reset_index()
 
-    positive_peak = (
-        qualifying[qualifying["EpisodeSignal"] == "positive"]
-        .groupby(GROUPS + ["EpisodeID"])[z_column]
-        .max()
+    peak = (
+        grouped[signal]
+        .apply(lambda x: x.loc[x.abs().idxmax()] if x.notna().any() else np.nan)
         .rename("PeakSignal")
         .reset_index()
-        .assign(EpisodeSignal="positive")
     )
 
-    negative_peak = (
-        qualifying[qualifying["EpisodeSignal"] == "negative"]
-        .groupby(GROUPS + ["EpisodeID"])[z_column]
-        .min()
-        .rename("PeakSignal")
-        .reset_index()
-        .assign(EpisodeSignal="negative")
-    )
-
-    peaks = pd.concat(
-        [positive_peak, negative_peak],
-        ignore_index=True,
-    )
-
-    return summary.merge(
-        peaks,
-        on=GROUPS + ["EpisodeID", "EpisodeSignal"],
+    return result.merge(
+        peak,
+        on=group_cols,
         how="left",
     )
 
 
 # ---------------------------------------------------------------------
-# Forward episode outcomes
+# Forward outcomes
 # ---------------------------------------------------------------------
 
 
-def measure_episode_outcomes(
-    df,
-    episodes,
-    horizons=(1, 2, 3, 5),
-):
+def measure_run_outcomes(
+    df: pd.DataFrame,
+    runs: pd.DataFrame,
+    horizons: tuple[int, ...] = (1, 2, 3, 5),
+) -> pd.DataFrame:
     """
-    Measure residuals after each episode.
+    Attach post-run residuals.
 
-    MatchAhead 1 means the first match after the episode ends.
-    """
-
-    df = df.sort_values(GROUPS + ["Match"]).copy()
-
-    residual_lookup = df.set_index(GROUPS + ["Match"])["Residual"]
-
-    records = []
-
-    for _, episode in episodes.iterrows():
-
-        base = {
-            "League": episode["League"],
-            "Season": episode["Season"],
-            "Team": episode["Team"],
-            "EpisodeID": episode["EpisodeID"],
-            "EpisodeSignal": episode["EpisodeSignal"],
-            "StartMatch": episode["StartMatch"],
-            "EndMatch": episode["EndMatch"],
-            "Length": episode["Length"],
-            "PeakSignal": episode["PeakSignal"],
-            "MeanSignal": episode["MeanSignal"],
-        }
-
-        future_values = []
-
-        for horizon in horizons:
-
-            key = (
-                episode["League"],
-                episode["Season"],
-                episode["Team"],
-                episode["EndMatch"] + horizon,
-            )
-
-            value = residual_lookup.get(key, np.nan)
-
-            future_values.append(value)
-
-            base[f"Residual_{horizon}"] = value
-
-        for horizon in horizons:
-
-            values = np.asarray(
-                future_values[:horizon],
-                dtype=float,
-            )
-
-            values = values[~np.isnan(values)]
-
-            base[f"CumulativeResidual_{horizon}"] = (
-                values.sum() if len(values) else np.nan
-            )
-
-        records.append(base)
-
-    return pd.DataFrame(records)
-
-
-# ---------------------------------------------------------------------
-# Clustered bootstrap
-# ---------------------------------------------------------------------
-
-
-def cluster_bootstrap_mean_ci(
-    data,
-    value_column,
-    cluster_columns=GROUPS,
-    n_bootstrap=5000,
-    confidence=0.95,
-    random_state=42,
-):
-    """
-    Bootstrap the mean while resampling whole team-season clusters.
+    MatchAhead=1 is the first match after the run.
     """
 
-    data = data.loc[data[value_column].notna()].copy()
+    if runs.empty:
+        return runs.copy()
 
-    if data.empty:
-        return np.nan, np.nan
+    group_cols = [
+        "League",
+        "Season",
+        "Team",
+    ]
 
-    clusters = data[cluster_columns].drop_duplicates()
+    history = df[
+        [
+            *group_cols,
+            "Match",
+            "Residual",
+        ]
+    ].sort_values(group_cols + ["Match"])
 
-    keys = list(
-        clusters.itertuples(
-            index=False,
-            name=None,
-        )
-    )
+    lookup = history.set_index(group_cols + ["Match"])["Residual"]
 
-    grouped = {
-        key: group[value_column].to_numpy(dtype=float)
-        for key, group in data.groupby(cluster_columns)
-    }
+    result = runs.copy()
 
-    rng = np.random.default_rng(random_state)
-
-    bootstrap_means = np.empty(n_bootstrap)
-
-    for i in range(n_bootstrap):
-
-        sampled = rng.choice(
-            len(keys),
-            size=len(keys),
-            replace=True,
-        )
+    for horizon in horizons:
 
         values = []
 
-        for index in sampled:
-            values.extend(grouped[keys[index]])
+        for row in result.itertuples(index=False):
 
-        bootstrap_means[i] = np.mean(values)
+            key = (
+                row.League,
+                row.Season,
+                row.Team,
+            )
 
-    alpha = 1 - confidence
+            target = int(row.EndMatch) + horizon
 
-    return (
-        np.quantile(
-            bootstrap_means,
-            alpha / 2,
-        ),
-        np.quantile(
-            bootstrap_means,
-            1 - alpha / 2,
-        ),
-    )
+            try:
+                value = lookup.loc[(*key, target)]
+            except KeyError:
+                value = np.nan
+
+            values.append(value)
+
+        result[f"Residual_{horizon}"] = values
+
+    return result
 
 
-def cluster_bootstrap_signal_difference(
-    data,
-    value_column,
-    signal_column="EpisodeSignal",
-    positive_label="positive",
-    negative_label="negative",
-    cluster_columns=GROUPS,
-    n_bootstrap=5000,
-    confidence=0.95,
-    random_state=42,
-):
+# ---------------------------------------------------------------------
+# Team-season aggregation
+# ---------------------------------------------------------------------
+
+
+def aggregate_team_seasons(
+    outcomes: pd.DataFrame,
+    horizons: tuple[int, ...] = (1, 2, 3, 5),
+    min_runs: int = 3,
+) -> pd.DataFrame:
     """
-    Bootstrap the difference:
+    Aggregate run outcomes to the team-season level.
 
-        negative mean - positive mean
+    This is the unit used for inference.
 
-    while resampling whole team-season clusters.
+    Each team-season contributes one observation per
+    RunSignal / MatchAhead combination.
     """
 
-    data = data.loc[data[value_column].notna()].copy()
+    rows = []
 
-    positive = data[data[signal_column] == positive_label]
+    group_cols = [
+        "League",
+        "Season",
+        "Team",
+        "RunSignal",
+    ]
 
-    negative = data[data[signal_column] == negative_label]
+    for horizon in horizons:
 
-    if positive.empty or negative.empty:
-        return np.nan, np.nan, np.nan
+        column = f"Residual_{horizon}"
 
-    clusters = data[cluster_columns].drop_duplicates()
+        valid = outcomes.dropna(subset=[column])
 
-    keys = list(
-        clusters.itertuples(
-            index=False,
-            name=None,
-        )
-    )
+        if valid.empty:
+            continue
 
-    grouped_positive = {
-        key: group[value_column].to_numpy(dtype=float)
-        for key, group in positive.groupby(cluster_columns)
-    }
-
-    grouped_negative = {
-        key: group[value_column].to_numpy(dtype=float)
-        for key, group in negative.groupby(cluster_columns)
-    }
-
-    rng = np.random.default_rng(random_state)
-
-    differences = np.empty(n_bootstrap)
-
-    for i in range(n_bootstrap):
-
-        sampled = rng.choice(
-            len(keys),
-            size=len(keys),
-            replace=True,
+        grouped = (
+            valid.groupby(
+                group_cols,
+                sort=False,
+            )[column]
+            .agg(
+                Runs="count",
+                MeanResidual="mean",
+                MedianResidual="median",
+                PositiveRate=lambda x: (x > 0).mean(),
+            )
+            .reset_index()
         )
 
-        positive_values = []
-        negative_values = []
+        grouped = grouped[grouped["Runs"] >= min_runs].copy()
 
-        for index in sampled:
+        grouped["MatchAhead"] = horizon
 
-            key = keys[index]
+        rows.append(grouped)
 
-            if key in grouped_positive:
-                positive_values.extend(grouped_positive[key])
-
-            if key in grouped_negative:
-                negative_values.extend(grouped_negative[key])
-
-        if positive_values and negative_values:
-
-            differences[i] = np.mean(negative_values) - np.mean(positive_values)
-
-        else:
-
-            differences[i] = np.nan
-
-    differences = differences[~np.isnan(differences)]
-
-    if len(differences) == 0:
-        return np.nan, np.nan, np.nan
-
-    observed = negative[value_column].mean() - positive[value_column].mean()
-
-    alpha = 1 - confidence
+    if not rows:
+        return pd.DataFrame()
 
     return (
-        observed,
-        np.quantile(
-            differences,
-            alpha / 2,
-        ),
-        np.quantile(
-            differences,
-            1 - alpha / 2,
-        ),
+        pd.concat(
+            rows,
+            ignore_index=True,
+        )
+        .sort_values(
+            [
+                "MatchAhead",
+                "MeanResidual",
+            ],
+            ascending=[
+                True,
+                False,
+            ],
+        )
+        .reset_index(drop=True)
     )
 
 
 # ---------------------------------------------------------------------
-# Episode performance
+# Cluster bootstrap
 # ---------------------------------------------------------------------
 
 
-def summarize_episode_performance(
-    episode_outcomes,
-    horizons=(1, 2, 3, 5),
-    n_bootstrap=5000,
-    confidence=0.95,
-):
+def bootstrap_cluster_mean_ci(
+    data: pd.DataFrame,
+    value_column: str,
+    cluster_columns: list[str],
+    n_bootstrap: int = 5000,
+    seed: int = 42,
+) -> tuple[float, float]:
     """
-    Summarise cumulative residual performance after episodes.
+    Bootstrap the mean after first aggregating within clusters.
+
+    This prevents multiple runs from the same team-season from
+    being treated as independent observations.
     """
 
-    results = []
+    cluster_values = (
+        data.groupby(cluster_columns)[value_column].mean().dropna().to_numpy()
+    )
 
-    for signal in ["positive", "negative"]:
+    if len(cluster_values) == 0:
+        return np.nan, np.nan
 
-        subset = episode_outcomes[episode_outcomes["EpisodeSignal"] == signal]
+    if len(cluster_values) == 1:
+        value = float(cluster_values[0])
+        return value, value
+
+    rng = np.random.default_rng(seed)
+
+    samples = rng.choice(
+        cluster_values,
+        size=(
+            n_bootstrap,
+            len(cluster_values),
+        ),
+        replace=True,
+    )
+
+    means = samples.mean(axis=1)
+
+    return tuple(
+        np.percentile(
+            means,
+            [2.5, 97.5],
+        )
+    )
+
+
+# ---------------------------------------------------------------------
+# Overall response
+# ---------------------------------------------------------------------
+
+
+def summarize_run_response(
+    outcomes: pd.DataFrame,
+    horizons: tuple[int, ...] = (1, 2, 3, 5),
+    n_bootstrap: int = 5000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """
+    Estimate post-run residual response.
+
+    Inference is clustered at team-season level.
+    """
+
+    rows = []
+
+    for signal in [
+        "positive",
+        "negative",
+    ]:
+
+        subset = outcomes[outcomes["RunSignal"] == signal].copy()
 
         for horizon in horizons:
 
-            column = f"CumulativeResidual_{horizon}"
+            column = f"Residual_{horizon}"
 
-            values = subset[column].dropna()
+            valid = subset.dropna(subset=[column])
 
-            if values.empty:
+            if valid.empty:
                 continue
 
-            ci_lower, ci_upper = cluster_bootstrap_mean_ci(
-                subset,
+            team_seasons = valid.groupby(
+                [
+                    "League",
+                    "Season",
+                    "Team",
+                ],
+                sort=False,
+            )[column].mean()
+
+            ci_lower, ci_upper = bootstrap_cluster_mean_ci(
+                valid,
                 column,
+                [
+                    "League",
+                    "Season",
+                    "Team",
+                ],
                 n_bootstrap=n_bootstrap,
-                confidence=confidence,
+                seed=seed,
             )
 
-            results.append(
+            rows.append(
                 {
-                    "Signal": signal,
-                    "Horizon": horizon,
-                    "Episodes": len(values),
-                    "MeanCumulativeResidual": values.mean(),
-                    "MedianCumulativeResidual": values.median(),
-                    "PositiveEpisodes_%": (values > 0).mean(),
+                    "RunSignal": signal,
+                    "MatchAhead": horizon,
+                    "N": len(valid),
+                    "TeamSeasons": len(team_seasons),
+                    "MeanResidual": valid[column].mean(),
+                    "TeamSeasonMean": team_seasons.mean(),
+                    "MedianResidual": valid[column].median(),
+                    "Positive_%": (valid[column] > 0).mean(),
                     "CI_Lower": ci_lower,
                     "CI_Upper": ci_upper,
                     "CI_Excludes_Zero": (ci_lower > 0 or ci_upper < 0),
                 }
             )
 
-    return pd.DataFrame(results)
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------
-# Individual forward residuals
+# Parameter sensitivity
 # ---------------------------------------------------------------------
 
 
-def summarize_forward_residuals(
-    episode_outcomes,
-    horizons=(1, 2, 3, 5),
-):
+def run_parameter_grid(
+    df: pd.DataFrame,
+    windows: tuple[int, ...],
+    thresholds: tuple[float, ...],
+    horizons: tuple[int, ...] = (1, 2, 3, 5),
+    min_runs: int = 3,
+    n_bootstrap: int = 5000,
+    seed: int = 42,
+) -> pd.DataFrame:
     """
-    Summarise the individual residual at each match after an episode.
+    Test whether the result is robust across run definitions.
     """
 
-    results = []
+    rows = []
 
-    for signal in ["positive", "negative"]:
+    for window in windows:
 
-        subset = episode_outcomes[episode_outcomes["EpisodeSignal"] == signal]
+        mean_column = f"ResidualMean_{window}"
 
-        for horizon in horizons:
+        if mean_column not in df.columns:
+            raise ValueError(f"{mean_column} not found.")
 
-            values = subset[f"Residual_{horizon}"].dropna()
+        for threshold in thresholds:
 
-            if values.empty:
-                continue
-
-            results.append(
-                {
-                    "Signal": signal,
-                    "MatchAhead": horizon,
-                    "N": len(values),
-                    "MeanResidual": values.mean(),
-                    "MedianResidual": values.median(),
-                    "Positive_%": (values > 0).mean(),
-                }
+            signalled = identify_residual_runs(
+                df,
+                window=window,
+                threshold=threshold,
             )
 
-    return pd.DataFrame(results)
+            runs = build_runs(
+                signalled,
+                window=window,
+            )
 
+            outcomes = measure_run_outcomes(
+                signalled,
+                runs,
+                horizons=horizons,
+            )
 
-# ---------------------------------------------------------------------
-# Positive vs negative comparison
-# ---------------------------------------------------------------------
+            response = summarize_run_response(
+                outcomes,
+                horizons=horizons,
+                n_bootstrap=n_bootstrap,
+                seed=seed,
+            )
 
+            if response.empty:
+                continue
 
-def compare_episode_signals(
-    episode_outcomes,
-    horizons=(1, 2, 3, 5),
-    n_bootstrap=5000,
-    confidence=0.95,
-):
-    """
-    Compare negative and positive episodes directly.
+            response = response.copy()
 
-    Difference = NegativeMean - PositiveMean.
-    """
+            response["Window"] = window
+            response["Threshold"] = threshold
 
-    results = []
+            rows.append(response)
 
-    for horizon in horizons:
+    if not rows:
+        return pd.DataFrame()
 
-        column = f"Residual_{horizon}"
-
-        subset = episode_outcomes.loc[episode_outcomes[column].notna()].copy()
-
-        positive = subset[subset["EpisodeSignal"] == "positive"]
-
-        negative = subset[subset["EpisodeSignal"] == "negative"]
-
-        if positive.empty or negative.empty:
-            continue
-
-        (
-            difference,
-            ci_lower,
-            ci_upper,
-        ) = cluster_bootstrap_signal_difference(
-            subset,
-            column,
-            n_bootstrap=n_bootstrap,
-            confidence=confidence,
+    return (
+        pd.concat(
+            rows,
+            ignore_index=True,
+        )[
+            [
+                "Window",
+                "Threshold",
+                "RunSignal",
+                "MatchAhead",
+                "N",
+                "TeamSeasons",
+                "MeanResidual",
+                "TeamSeasonMean",
+                "MedianResidual",
+                "Positive_%",
+                "CI_Lower",
+                "CI_Upper",
+                "CI_Excludes_Zero",
+            ]
+        ]
+        .sort_values(
+            [
+                "MatchAhead",
+                "RunSignal",
+                "Window",
+                "Threshold",
+            ]
         )
-
-        results.append(
-            {
-                "MatchAhead": horizon,
-                "PositiveMean": positive[column].mean(),
-                "NegativeMean": negative[column].mean(),
-                "NegativeMinusPositive": difference,
-                "CI_Lower": ci_lower,
-                "CI_Upper": ci_upper,
-                "CI_Excludes_Zero": (ci_lower > 0 or ci_upper < 0),
-                "Positive_N": len(positive),
-                "Negative_N": len(negative),
-            }
-        )
-
-    return pd.DataFrame(results)
+        .reset_index(drop=True)
+    )
