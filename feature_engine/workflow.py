@@ -12,8 +12,8 @@ from analysis import (
     build_runs,
     measure_run_outcomes,
     summarize_run_response,
-    summarize_prospective_market_movement,
     build_prospective_market_movement,
+    summarize_prospective_market_movement,
     aggregate_team_seasons,
     run_parameter_grid,
 )
@@ -65,9 +65,9 @@ SEED = 42
 def load_all_residuals(
     directory: Path = RESIDUAL_DIR,
 ) -> pd.DataFrame:
-    """Load all generated residual datasets."""
+    """Load all generated residual CSV files."""
 
-    files = sorted(Path(directory).glob("*/*.csv"))
+    files = sorted(directory.glob("*/*.csv"))
 
     if not files:
         raise FileNotFoundError(f"No residual CSV files found in {directory}")
@@ -85,6 +85,86 @@ def load_all_residuals(
 
 
 # ---------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------
+
+
+def validate_dataset(
+    df: pd.DataFrame,
+) -> None:
+    """Validate the generated residual dataset."""
+
+    required = [
+        "Date",
+        "League",
+        "Season",
+        "Team",
+        "Opponent",
+        "Match",
+        "Residual",
+        "PreCloseWinProb",
+        "PreCloseDrawProb",
+        "PreCloseLossProb",
+        "CloseWinProb",
+        "CloseDrawProb",
+        "CloseLossProb",
+    ]
+
+    missing = [column for column in required if column not in df.columns]
+
+    if missing:
+        raise ValueError(
+            "Residual dataset is missing required columns:\n"
+            f"{missing}\n\n"
+            "Run generate_residual_dataset.py first."
+        )
+
+    probability_columns = [
+        "PreCloseWinProb",
+        "PreCloseDrawProb",
+        "PreCloseLossProb",
+        "CloseWinProb",
+        "CloseDrawProb",
+        "CloseLossProb",
+    ]
+
+    for column in probability_columns:
+
+        if (
+            df[column].isna().any()
+            or (df[column] <= 0).any()
+            or (df[column] >= 1).any()
+        ):
+            raise ValueError(f"Invalid probability values in {column}.")
+
+    preclose_sum = df[
+        [
+            "PreCloseWinProb",
+            "PreCloseDrawProb",
+            "PreCloseLossProb",
+        ]
+    ].sum(axis=1)
+
+    close_sum = df[
+        [
+            "CloseWinProb",
+            "CloseDrawProb",
+            "CloseLossProb",
+        ]
+    ].sum(axis=1)
+
+    if not (preclose_sum.sub(1).abs() < 0.002).all():
+        raise ValueError(
+            "Pre-closing no-vig probabilities " "do not sum approximately to 1."
+        )
+
+    if not (close_sum.sub(1).abs() < 0.002).all():
+        raise ValueError(
+            "Closing no-vig probabilities " "do not sum approximately to 1."
+        )
+
+
+# ---------------------------------------------------------------------
 # Main analysis
 # ---------------------------------------------------------------------
 
@@ -94,31 +174,10 @@ def run_analysis() -> dict[str, pd.DataFrame]:
 
     df = load_all_residuals()
 
-    # ---------------------------------------------------------------
-    # Validate generated dataset
-    # ---------------------------------------------------------------
-
-    required_columns = [
-        "Residual",
-        "PreCloseWinProb",
-        "CloseWinProb",
-        "PreCloseDrawProb",
-        "CloseDrawProb",
-        "PreCloseLossProb",
-        "CloseLossProb",
-    ]
-
-    missing = [column for column in required_columns if column not in df.columns]
-
-    if missing:
-        raise ValueError(
-            "Residual dataset is missing required columns: "
-            f"{missing}\n\n"
-            "Run generate_residual_dataset.py first."
-        )
+    validate_dataset(df)
 
     # ---------------------------------------------------------------
-    # Rolling residual history
+    # Historical residual information
     # ---------------------------------------------------------------
 
     df = add_rolling_residuals(
@@ -127,7 +186,7 @@ def run_analysis() -> dict[str, pd.DataFrame]:
     )
 
     # ---------------------------------------------------------------
-    # Baseline run
+    # Baseline signal
     # ---------------------------------------------------------------
 
     signalled = identify_residual_runs(
@@ -142,7 +201,7 @@ def run_analysis() -> dict[str, pd.DataFrame]:
     )
 
     # ---------------------------------------------------------------
-    # Future matches
+    # Future outcomes
     # ---------------------------------------------------------------
 
     outcomes = measure_run_outcomes(
@@ -179,17 +238,16 @@ def run_analysis() -> dict[str, pd.DataFrame]:
     )
 
     # ---------------------------------------------------------------
-    # Team-season responses
+    # Team-season response
     # ---------------------------------------------------------------
 
     team_seasons = aggregate_team_seasons(
         outcomes,
-        horizons=HORIZONS,
         min_runs=MIN_RUNS,
     )
 
     # ---------------------------------------------------------------
-    # Run-definition sensitivity
+    # Signal-definition sensitivity
     # ---------------------------------------------------------------
 
     sensitivity = run_parameter_grid(
@@ -256,15 +314,7 @@ if __name__ == "__main__":
     print(results["market_movement_response"].to_string(index=False))
 
     print("\nTOP TEAM-SEASON RESPONSES")
-    print(
-        results["team_seasons"]
-        .sort_values(
-            "MeanResidual",
-            ascending=False,
-        )
-        .head(50)
-        .to_string(index=False)
-    )
+    print(results["team_seasons"].head(50).to_string(index=False))
 
     print("\nPARAMETER SENSITIVITY")
     print(results["sensitivity"].to_string(index=False))

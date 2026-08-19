@@ -8,20 +8,11 @@ import pandas as pd
 
 from residuals import build_residual_dataset
 
-# ---------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------
-
 RAW_DATA_DIR = Path("/Users/ryanfarrelly/Desktop/collector/DATA/football-data")
 
 OUTPUT_DIR = Path("residuals")
 
 RESIDUAL_DEFINITION = "points"
-
-
-# ---------------------------------------------------------------------
-# File discovery
-# ---------------------------------------------------------------------
 
 
 def find_raw_files(
@@ -37,17 +28,12 @@ def find_raw_files(
     return files
 
 
-# ---------------------------------------------------------------------
-# Processing
-# ---------------------------------------------------------------------
-
-
 def process_file(
     input_path: Path,
     raw_directory: Path,
     output_directory: Path,
 ) -> dict:
-    """Process one raw CSV and save its residual dataset."""
+    """Process one raw CSV."""
 
     output_path = output_directory / input_path.relative_to(raw_directory)
 
@@ -74,11 +60,6 @@ def process_file(
     }
 
 
-# ---------------------------------------------------------------------
-# Main processing
-# ---------------------------------------------------------------------
-
-
 def process_all_files(
     raw_directory: Path = RAW_DATA_DIR,
     output_directory: Path = OUTPUT_DIR,
@@ -87,43 +68,38 @@ def process_all_files(
 
     files = find_raw_files(raw_directory)
 
-    rows = []
+    results = []
 
     print(f"Found {len(files)} raw files.\n")
 
-    for number, input_path in enumerate(
-        files,
-        start=1,
-    ):
+    for number, input_path in enumerate(files, start=1):
 
         try:
-
             result = process_file(
                 input_path=input_path,
                 raw_directory=raw_directory,
                 output_directory=output_directory,
             )
 
-            rows.append(result)
+            results.append(result)
 
             print(f"[{number}/{len(files)}] " f"OK  {input_path}")
 
         except Exception as exc:
 
-            result = {
-                "Input": str(input_path),
-                "Output": "",
-                "Rows": 0,
-                "Status": f"ERROR: {exc}",
-            }
-
-            rows.append(result)
+            results.append(
+                {
+                    "Input": str(input_path),
+                    "Output": "",
+                    "Rows": 0,
+                    "Status": f"ERROR: {exc}",
+                }
+            )
 
             print(f"[{number}/{len(files)}] " f"ERROR  {input_path}")
-
             print(f"        {exc}")
 
-    summary = pd.DataFrame(rows)
+    summary = pd.DataFrame(results)
 
     successful = (summary["Status"] == "OK").sum()
 
@@ -135,11 +111,6 @@ def process_all_files(
     print(f"Files failed:    {failed}")
 
     return summary
-
-
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
 
 
 if __name__ == "__main__":

@@ -7,39 +7,28 @@ from pathlib import Path
 
 import pandas as pd
 
-# ---------------------------------------------------------------------
-# Match calculations
-# ---------------------------------------------------------------------
 
-
-def get_points(goals_for, goals_against) -> int:
+def get_points(goals_for: int, goals_against: int) -> int:
     """Return league points from a match result."""
 
     if goals_for > goals_against:
         return 3
-
     if goals_for == goals_against:
         return 1
-
     return 0
 
 
 def expected_points(
-    p_win: pd.Series,
-    p_draw: pd.Series,
+    win_probability: pd.Series,
+    draw_probability: pd.Series,
 ) -> pd.Series:
-    """Expected league points from win/draw probabilities."""
+    """Calculate expected league points."""
 
-    return 3 * p_win + p_draw
-
-
-# ---------------------------------------------------------------------
-# Market calculations
-# ---------------------------------------------------------------------
+    return 3 * win_probability + draw_probability
 
 
 def get_no_vig_odds_multiway(
-    odds,
+    odds: list[float],
     accuracy: int = 3,
 ) -> tuple[float, float, float]:
     """
@@ -48,23 +37,22 @@ def get_no_vig_odds_multiway(
 
     c = 1.0
     max_error = (10**-accuracy) / 2
-    current_error = float("inf")
 
-    while current_error > max_error:
+    for _ in range(100):
         probabilities = [(1 / odd) ** c for odd in odds]
 
-        f = -1 + sum(probabilities)
+        total = sum(probabilities)
+        error = total - 1
 
-        f_dash = sum(
+        if abs(error) <= max_error:
+            break
+
+        derivative = sum(
             probability * (-math.log(odd))
-            for probability, odd in zip(probabilities, odds)
+            for probability, odd in zip(odds, probabilities)
         )
 
-        c -= f / f_dash
-
-        total_probability = sum((1 / odd) ** c for odd in odds)
-
-        current_error = abs(total_probability - 1)
+        c -= error / derivative
 
     return tuple(odd**c for odd in odds)
 
@@ -74,13 +62,7 @@ def add_no_vig_market(
     odds_columns: list[str],
     prefix: str,
 ) -> pd.DataFrame:
-    """
-    Add no-vig odds and probabilities for a three-way market.
-
-    Example:
-        prefix="PreClose"
-        odds_columns=["B365H", "B365D", "B365A"]
-    """
+    """Add no-vig odds and probabilities for a three-way market."""
 
     df = df.copy()
 
@@ -96,30 +78,13 @@ def add_no_vig_market(
         f"{prefix}NoVigA",
     ]
 
-    probability_columns = [
-        f"{prefix}NoVigPH",
-        f"{prefix}NoVigPD",
-        f"{prefix}NoVigPA",
-    ]
+    df[f"{prefix}NoVigH"] = fair_odds.iloc[:, 0]
+    df[f"{prefix}NoVigD"] = fair_odds.iloc[:, 1]
+    df[f"{prefix}NoVigA"] = fair_odds.iloc[:, 2]
 
-    df[
-        [
-            f"{prefix}NoVigH",
-            f"{prefix}NoVigD",
-            f"{prefix}NoVigA",
-        ]
-    ] = fair_odds
-
-    df[probability_columns] = (
-        1
-        / df[
-            [
-                f"{prefix}NoVigH",
-                f"{prefix}NoVigD",
-                f"{prefix}NoVigA",
-            ]
-        ]
-    )
+    df[f"{prefix}NoVigPH"] = 1 / df[f"{prefix}NoVigH"]
+    df[f"{prefix}NoVigPD"] = 1 / df[f"{prefix}NoVigD"]
+    df[f"{prefix}NoVigPA"] = 1 / df[f"{prefix}NoVigA"]
 
     return df
 
@@ -127,69 +92,43 @@ def add_no_vig_market(
 def calculate_market_probabilities(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Calculate no-vig probabilities for both pre-closing and
-    closing Bet365 three-way markets.
-    """
-
-    df = df.copy()
+    """Calculate no-vig probabilities for pre-close and close markets."""
 
     df = add_no_vig_market(
         df,
-        odds_columns=[
-            "B365H",
-            "B365D",
-            "B365A",
-        ],
-        prefix="PreClose",
+        ["B365H", "B365D", "B365A"],
+        "PreClose",
     )
 
     df = add_no_vig_market(
         df,
-        odds_columns=[
-            "B365CH",
-            "B365CD",
-            "B365CA",
-        ],
-        prefix="Close",
+        ["B365CH", "B365CD", "B365CA"],
+        "Close",
     )
 
     return df
-
-
-# ---------------------------------------------------------------------
-# Residual
-# ---------------------------------------------------------------------
 
 
 def add_residual(
     df: pd.DataFrame,
     definition: str = "points",
 ) -> pd.DataFrame:
-    """Add the selected residual definition."""
+    """Add the selected market residual."""
 
     df = df.copy()
 
     if definition == "points":
-
         df["Residual"] = df["ActualPoints"] - df["ExpectedPoints"]
 
     elif definition == "win":
-
         actual_win = (df["ActualPoints"] == 3).astype(int)
 
         df["Residual"] = actual_win - df["PreCloseWinProb"]
 
     else:
-
         raise ValueError(f"Unknown residual definition: {definition}")
 
     return df
-
-
-# ---------------------------------------------------------------------
-# Team-match dataset
-# ---------------------------------------------------------------------
 
 
 def build_team_match_dataset(
@@ -197,13 +136,13 @@ def build_team_match_dataset(
     residual_definition: str = "points",
 ) -> pd.DataFrame:
     """
-    Convert match-level data into one observation per team per match.
+    Convert match-level data into one row per team per match.
 
-    The residual is based on the pre-closing market.
+    Expected points and residuals use PRE-CLOSING odds.
 
-    Both pre-closing and closing probabilities are retained so that
-    future market movement can be measured without reconstructing
-    the raw bookmaker data.
+    Both pre-closing and closing probabilities are retained because
+    the later analysis examines how the market moved after the
+    pre-closing price was available.
     """
 
     df = df.copy()
@@ -211,10 +150,6 @@ def build_team_match_dataset(
     df["Date"] = pd.to_datetime(df["Date"])
 
     df = df.sort_values(["Date", "HomeTeam", "AwayTeam"]).reset_index(drop=True)
-
-    # ---------------------------------------------------------------
-    # Expected points from pre-closing market
-    # ---------------------------------------------------------------
 
     df["HomeEP"] = expected_points(
         df["PreCloseNoVigPH"],
@@ -226,29 +161,13 @@ def build_team_match_dataset(
         df["PreCloseNoVigPD"],
     )
 
-    # ---------------------------------------------------------------
-    # Actual points
-    # ---------------------------------------------------------------
-
     df["HomePoints"] = [
-        get_points(home, away)
-        for home, away in zip(
-            df["FTHG"],
-            df["FTAG"],
-        )
+        get_points(home, away) for home, away in zip(df["FTHG"], df["FTAG"])
     ]
 
     df["AwayPoints"] = [
-        get_points(away, home)
-        for home, away in zip(
-            df["FTHG"],
-            df["FTAG"],
-        )
+        get_points(away, home) for home, away in zip(df["FTHG"], df["FTAG"])
     ]
-
-    # ---------------------------------------------------------------
-    # Home observations
-    # ---------------------------------------------------------------
 
     home = pd.DataFrame(
         {
@@ -260,7 +179,7 @@ def build_team_match_dataset(
             "Venue": "home",
             "GoalsFor": df["FTHG"],
             "GoalsAgainst": df["FTAG"],
-            "GoalDifference": (df["FTHG"] - df["FTAG"]),
+            "GoalDifference": df["FTHG"] - df["FTAG"],
             "PreCloseWinProb": df["PreCloseNoVigPH"],
             "PreCloseDrawProb": df["PreCloseNoVigPD"],
             "PreCloseLossProb": df["PreCloseNoVigPA"],
@@ -272,10 +191,6 @@ def build_team_match_dataset(
         }
     )
 
-    # ---------------------------------------------------------------
-    # Away observations
-    # ---------------------------------------------------------------
-
     away = pd.DataFrame(
         {
             "Date": df["Date"],
@@ -286,7 +201,7 @@ def build_team_match_dataset(
             "Venue": "away",
             "GoalsFor": df["FTAG"],
             "GoalsAgainst": df["FTHG"],
-            "GoalDifference": (df["FTAG"] - df["FTHG"]),
+            "GoalDifference": df["FTAG"] - df["FTHG"],
             "PreCloseWinProb": df["PreCloseNoVigPA"],
             "PreCloseDrawProb": df["PreCloseNoVigPD"],
             "PreCloseLossProb": df["PreCloseNoVigPH"],
@@ -298,34 +213,16 @@ def build_team_match_dataset(
         }
     )
 
-    # ---------------------------------------------------------------
-    # Combine
-    # ---------------------------------------------------------------
-
     team_df = pd.concat(
         [home, away],
         ignore_index=True,
     )
 
-    team_df = team_df.sort_values(
-        [
-            "League",
-            "Season",
-            "Team",
-            "Date",
-        ]
-    ).reset_index(drop=True)
-
-    team_df["Match"] = (
-        team_df.groupby(
-            [
-                "League",
-                "Season",
-                "Team",
-            ]
-        ).cumcount()
-        + 1
+    team_df = team_df.sort_values(["League", "Season", "Team", "Date"]).reset_index(
+        drop=True
     )
+
+    team_df["Match"] = team_df.groupby(["League", "Season", "Team"]).cumcount() + 1
 
     return add_residual(
         team_df,
@@ -333,18 +230,11 @@ def build_team_match_dataset(
     )
 
 
-# ---------------------------------------------------------------------
-# Pipeline
-# ---------------------------------------------------------------------
-
-
 def build_residual_dataset(
     path: str | Path,
     residual_definition: str = "points",
 ) -> pd.DataFrame:
-    """
-    Load one football-data CSV and build the team-match dataset.
-    """
+    """Load one raw football-data CSV and build the residual dataset."""
 
     path = Path(path)
 
@@ -369,7 +259,10 @@ def build_residual_dataset(
         errors="coerce",
     )
 
-    df = df.dropna(subset=required_odds).reset_index(drop=True)
+    df = df.dropna(subset=required_odds + ["FTHG", "FTAG"]).reset_index(drop=True)
+
+    if df.empty:
+        raise ValueError(f"{path} contains no usable matches after filtering.")
 
     df = calculate_market_probabilities(df)
 

@@ -6,159 +6,72 @@ import numpy as np
 import pandas as pd
 
 # ---------------------------------------------------------------------
-# Rolling residuals
+# Rolling residual history
 # ---------------------------------------------------------------------
 
 
 def add_rolling_residuals(
     df: pd.DataFrame,
-    windows: tuple[int, ...] = (3, 5, 8),
+    windows: tuple[int, ...],
 ) -> pd.DataFrame:
     """
-    Add trailing residual statistics.
+    Add rolling residual means using ONLY matches already completed.
 
-    The current match is excluded.
-
-    History resets for each League / Season / Team.
+    This is deliberately shifted by one match to prevent the current
+    match from influencing the signal used to enter the next match.
     """
 
     df = df.copy()
 
-    group_cols = [
-        "League",
-        "Season",
-        "Team",
-    ]
+    df = df.sort_values(["League", "Season", "Team", "Match"]).reset_index(drop=True)
 
-    df["Date"] = pd.to_datetime(df["Date"])
-
-    df = df.sort_values(group_cols + ["Date", "Match"]).reset_index(drop=True)
-
-    grouped = df.groupby(
-        group_cols,
+    group = df.groupby(
+        ["League", "Season", "Team"],
         sort=False,
     )["Residual"]
 
     for window in windows:
-
-        prior = grouped.shift(1)
-
-        rolling = prior.groupby(
-            [
-                df["League"],
-                df["Season"],
-                df["Team"],
-            ],
-            sort=False,
-        ).rolling(
-            window=window,
-            min_periods=window,
-        )
-
-        df[f"ResidualMean_{window}"] = (
-            rolling.mean()
-            .reset_index(
-                level=group_cols,
-                drop=True,
-            )
-            .to_numpy()
-        )
-
-        df[f"ResidualStd_{window}"] = (
-            rolling.std(ddof=1)
-            .reset_index(
-                level=group_cols,
-                drop=True,
-            )
-            .to_numpy()
-        )
-
-        df[f"ResidualSum_{window}"] = (
-            rolling.sum()
-            .reset_index(
-                level=group_cols,
-                drop=True,
-            )
-            .to_numpy()
+        df[f"RollingResidual_{window}"] = (
+            group.rolling(window)
+            .mean()
+            .shift(1)
+            .reset_index(level=[0, 1, 2], drop=True)
         )
 
     return df
 
 
 # ---------------------------------------------------------------------
-# Residual runs
+# Signal identification
 # ---------------------------------------------------------------------
 
 
 def identify_residual_runs(
     df: pd.DataFrame,
-    window: int = 5,
-    threshold: float = 0.50,
+    window: int,
+    threshold: float,
 ) -> pd.DataFrame:
     """
-    Identify positive and negative residual runs.
+    Identify teams whose previous residual history is sufficiently
+    positive or negative to create a signal for the CURRENT match.
 
-    The signal for match t uses only residuals from matches before t.
+    The signal is therefore available before the current match.
     """
 
     df = df.copy()
 
-    signal_column = f"ResidualMean_{window}"
+    column = f"RollingResidual_{window}"
 
-    if signal_column not in df.columns:
-        raise ValueError(
-            f"{signal_column} not found. " "Run add_rolling_residuals() first."
-        )
+    if column not in df.columns:
+        raise ValueError(f"{column} not found. " "Run add_rolling_residuals first.")
 
-    df["RunSignal"] = pd.Series(
-        pd.NA,
-        index=df.index,
-        dtype="string",
-    )
+    df["RunSignal"] = pd.NA
 
-    df.loc[
-        df[signal_column] >= threshold,
-        "RunSignal",
-    ] = "positive"
+    positive = df[column] >= threshold
+    negative = df[column] <= -threshold
 
-    df.loc[
-        df[signal_column] <= -threshold,
-        "RunSignal",
-    ] = "negative"
-
-    group_cols = [
-        "League",
-        "Season",
-        "Team",
-    ]
-
-    previous = df.groupby(
-        group_cols,
-        sort=False,
-    )[
-        "RunSignal"
-    ].shift(1)
-
-    new_run = df["RunSignal"].notna() & (previous.isna() | df["RunSignal"].ne(previous))
-
-    run_number = (
-        new_run.astype(int)
-        .groupby(
-            [
-                df["League"],
-                df["Season"],
-                df["Team"],
-            ],
-            sort=False,
-        )
-        .cumsum()
-    )
-
-    df["RunID"] = np.where(
-        df["RunSignal"].notna(),
-        run_number,
-        np.nan,
-    )
+    df.loc[positive, "RunSignal"] = "positive"
+    df.loc[negative, "RunSignal"] = "negative"
 
     return df
 
@@ -170,316 +83,205 @@ def identify_residual_runs(
 
 def build_runs(
     df: pd.DataFrame,
-    window: int = 5,
+    window: int,
 ) -> pd.DataFrame:
-    """Create one row per residual run."""
+    """
+    Build signal runs.
 
-    signal = f"ResidualMean_{window}"
+    A run is a consecutive sequence of matches for the same
+    team-season carrying the same signal.
+    """
 
-    required = [
-        "League",
-        "Season",
-        "Team",
-        "Match",
-        "RunID",
-        "RunSignal",
-        signal,
-    ]
+    df = df.copy()
 
-    missing = [column for column in required if column not in df.columns]
+    df["SignalChange"] = df["RunSignal"] != df.groupby(["League", "Season", "Team"])[
+        "RunSignal"
+    ].shift(1)
 
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+    df["RunID"] = df.groupby(["League", "Season", "Team"])["SignalChange"].cumsum()
 
-    data = df[df["RunID"].notna()].copy()
-
-    if data.empty:
-        return pd.DataFrame(
-            columns=[
+    runs = (
+        df[df["RunSignal"].notna()]
+        .groupby(
+            [
                 "League",
                 "Season",
                 "Team",
-                "RunID",
                 "RunSignal",
-                "StartMatch",
-                "EndMatch",
-                "Length",
-                "EntrySignal",
-                "MeanSignal",
-                "PeakSignal",
-            ]
+                "RunID",
+            ],
+            as_index=False,
         )
-
-    group_cols = [
-        "League",
-        "Season",
-        "Team",
-        "RunID",
-    ]
-
-    grouped = data.groupby(
-        group_cols,
-        sort=False,
+        .agg(
+            StartMatch=("Match", "min"),
+            EndMatch=("Match", "max"),
+            RunLength=("Match", "size"),
+            StartDate=("Date", "min"),
+            EndDate=("Date", "max"),
+        )
     )
 
-    result = grouped.agg(
-        RunSignal=("RunSignal", "first"),
-        StartMatch=("Match", "min"),
-        EndMatch=("Match", "max"),
-        Length=("Match", "size"),
-        EntrySignal=(signal, "first"),
-        MeanSignal=(signal, "mean"),
-    ).reset_index()
-
-    peak = (
-        grouped[signal]
-        .apply(lambda x: x.loc[x.abs().idxmax()] if x.notna().any() else np.nan)
-        .rename("PeakSignal")
-        .reset_index()
-    )
-
-    return result.merge(
-        peak,
-        on=group_cols,
-        how="left",
-    )
+    return runs
 
 
 # ---------------------------------------------------------------------
-# Forward outcomes
+# Future match outcomes
 # ---------------------------------------------------------------------
 
 
 def measure_run_outcomes(
-    df: pd.DataFrame,
+    signalled: pd.DataFrame,
     runs: pd.DataFrame,
-    horizons: tuple[int, ...] = (1, 2, 3, 5),
+    horizons: tuple[int, ...],
 ) -> pd.DataFrame:
     """
-    Attach information from matches after each run.
+    Attach future match outcomes to every signal.
 
-    MatchAhead=1 is the first match after the run.
-
-    The resulting columns describe the future match and include:
-
-        Residual
-        PreCloseWinProb
-        CloseWinProb
-        WinProbMove
-        PreCloseDrawProb
-        CloseDrawProb
-        DrawProbMove
-        PreCloseLossProb
-        CloseLossProb
-        LossProbMove
-
-    These are measured only after the run has ended.
+    For a signal at match N, MatchAhead=1 refers to N+1,
+    MatchAhead=2 to N+2, etc.
     """
 
-    if runs.empty:
-        return runs.copy()
+    df = signalled.copy()
 
-    group_cols = [
+    key_columns = [
         "League",
         "Season",
         "Team",
     ]
 
-    columns = [
-        *group_cols,
+    history_columns = [
+        "Date",
+        "League",
+        "Season",
+        "Team",
+        "Opponent",
+        "Venue",
         "Match",
+        "GoalsFor",
+        "GoalsAgainst",
+        "GoalDifference",
+        "ActualPoints",
         "Residual",
         "PreCloseWinProb",
-        "CloseWinProb",
         "PreCloseDrawProb",
-        "CloseDrawProb",
         "PreCloseLossProb",
+        "CloseWinProb",
+        "CloseDrawProb",
         "CloseLossProb",
     ]
 
-    missing = [column for column in columns if column not in df.columns]
+    history = df[history_columns].sort_values(key_columns + ["Match"]).copy()
 
-    if missing:
-        raise ValueError(
-            "Residual dataset is missing required columns: "
-            f"{missing}. "
-            "Regenerate the residual dataset with "
-            "generate_residual_dataset.py."
-        )
+    signal_rows = df[df["RunSignal"].notna()][
+        key_columns
+        + [
+            "Match",
+            "RunSignal",
+            "RollingResidual_3",
+            "RollingResidual_5",
+            "RollingResidual_8",
+        ]
+    ].copy()
 
-    history = df[columns].sort_values(group_cols + ["Match"]).copy()
+    signal_rows = signal_rows.rename(columns={"Match": "SignalMatch"})
 
-    history["WinProbMove"] = history["CloseWinProb"] - history["PreCloseWinProb"]
-
-    history["DrawProbMove"] = history["CloseDrawProb"] - history["PreCloseDrawProb"]
-
-    history["LossProbMove"] = history["CloseLossProb"] - history["PreCloseLossProb"]
-
-    history = history.set_index(group_cols + ["Match"])
-
-    result = runs.copy()
+    outputs = []
 
     for horizon in horizons:
 
-        rows = []
+        future = history.copy()
 
-        for row in result.itertuples(index=False):
+        future["SignalMatch"] = future["Match"] - horizon
 
-            key = (
-                row.League,
-                row.Season,
-                row.Team,
-                int(row.EndMatch) + horizon,
-            )
-
-            try:
-                match = history.loc[key]
-
-            except KeyError:
-                rows.append(
-                    {
-                        "Residual": np.nan,
-                        "PreCloseWinProb": np.nan,
-                        "CloseWinProb": np.nan,
-                        "WinProbMove": np.nan,
-                        "PreCloseDrawProb": np.nan,
-                        "CloseDrawProb": np.nan,
-                        "DrawProbMove": np.nan,
-                        "PreCloseLossProb": np.nan,
-                        "CloseLossProb": np.nan,
-                        "LossProbMove": np.nan,
-                    }
-                )
-                continue
-
-            rows.append(
-                {
-                    "Residual": match["Residual"],
-                    "PreCloseWinProb": match["PreCloseWinProb"],
-                    "CloseWinProb": match["CloseWinProb"],
-                    "WinProbMove": match["WinProbMove"],
-                    "PreCloseDrawProb": match["PreCloseDrawProb"],
-                    "CloseDrawProb": match["CloseDrawProb"],
-                    "DrawProbMove": match["DrawProbMove"],
-                    "PreCloseLossProb": match["PreCloseLossProb"],
-                    "CloseLossProb": match["CloseLossProb"],
-                    "LossProbMove": match["LossProbMove"],
-                }
-            )
-
-        prefix = f"MatchAhead_{horizon}_"
-
-        values = pd.DataFrame(
-            rows,
-            index=result.index,
+        future = future.rename(
+            columns={
+                column: f"Future_{column}"
+                for column in history_columns
+                if column not in key_columns
+            }
         )
 
-        values = values.rename(
-            columns={column: f"{prefix}{column}" for column in values.columns}
+        merged = signal_rows.merge(
+            future,
+            on=key_columns + ["SignalMatch"],
+            how="left",
         )
 
-        result = pd.concat(
-            [result, values],
-            axis=1,
-        )
+        merged["MatchAhead"] = horizon
 
-    return result
+        outputs.append(merged)
+
+    return pd.concat(
+        outputs,
+        ignore_index=True,
+    )
 
 
 # ---------------------------------------------------------------------
-# Cluster bootstrap
+# Bootstrap
 # ---------------------------------------------------------------------
 
 
-def bootstrap_cluster_mean_ci(
-    data: pd.DataFrame,
-    value_column: str,
-    cluster_columns: list[str],
+def bootstrap_mean_ci(
+    values: pd.Series,
     n_bootstrap: int = 5000,
     seed: int = 42,
 ) -> tuple[float, float]:
-    """Bootstrap a mean after aggregating within clusters."""
+    """Bootstrap 95% confidence interval for a mean."""
 
-    cluster_values = (
-        data.groupby(cluster_columns)[value_column].mean().dropna().to_numpy()
-    )
+    values = pd.Series(values).dropna().to_numpy()
 
-    if len(cluster_values) == 0:
+    if len(values) == 0:
         return np.nan, np.nan
 
-    if len(cluster_values) == 1:
-        value = float(cluster_values[0])
-        return value, value
+    if len(values) == 1:
+        return values[0], values[0]
 
     rng = np.random.default_rng(seed)
 
     samples = rng.choice(
-        cluster_values,
-        size=(
-            n_bootstrap,
-            len(cluster_values),
-        ),
+        values,
+        size=(n_bootstrap, len(values)),
         replace=True,
     )
 
     means = samples.mean(axis=1)
 
-    return tuple(
-        np.percentile(
-            means,
-            [2.5, 97.5],
-        )
+    return (
+        float(np.percentile(means, 2.5)),
+        float(np.percentile(means, 97.5)),
     )
 
 
 # ---------------------------------------------------------------------
-# Run response
+# Overall response
 # ---------------------------------------------------------------------
 
 
 def summarize_run_response(
     outcomes: pd.DataFrame,
-    horizons: tuple[int, ...] = (1, 2, 3, 5),
+    horizons: tuple[int, ...],
     n_bootstrap: int = 5000,
     seed: int = 42,
 ) -> pd.DataFrame:
-    """Estimate post-run residual response."""
+    """Summarise future residual response."""
 
     rows = []
 
-    for signal in [
-        "positive",
-        "negative",
-    ]:
-
-        subset = outcomes[outcomes["RunSignal"] == signal]
+    for signal in ["positive", "negative"]:
 
         for horizon in horizons:
 
-            column = f"MatchAhead_{horizon}_Residual"
+            subset = outcomes[
+                (outcomes["RunSignal"] == signal)
+                & (outcomes["MatchAhead"] == horizon)
+                & outcomes["Future_Residual"].notna()
+            ]
 
-            valid = subset.dropna(subset=[column])
+            values = subset["Future_Residual"]
 
-            if valid.empty:
-                continue
-
-            team_seasons = valid.groupby(
-                [
-                    "League",
-                    "Season",
-                    "Team",
-                ],
-                sort=False,
-            )[column].mean()
-
-            ci_lower, ci_upper = bootstrap_cluster_mean_ci(
-                valid,
-                column,
-                [
-                    "League",
-                    "Season",
-                    "Team",
-                ],
+            lower, upper = bootstrap_mean_ci(
+                values,
                 n_bootstrap=n_bootstrap,
                 seed=seed,
             )
@@ -488,15 +290,16 @@ def summarize_run_response(
                 {
                     "RunSignal": signal,
                     "MatchAhead": horizon,
-                    "N": len(valid),
-                    "TeamSeasons": len(team_seasons),
-                    "MeanResidual": valid[column].mean(),
-                    "TeamSeasonMean": team_seasons.mean(),
-                    "MedianResidual": valid[column].median(),
-                    "Positive_%": (valid[column] > 0).mean(),
-                    "CI_Lower": ci_lower,
-                    "CI_Upper": ci_upper,
-                    "CI_Excludes_Zero": (ci_lower > 0 or ci_upper < 0),
+                    "N": len(values),
+                    "TeamSeasons": (
+                        subset[["League", "Season", "Team"]].drop_duplicates().shape[0]
+                    ),
+                    "MeanResidual": values.mean(),
+                    "MedianResidual": values.median(),
+                    "Positive_%": ((values > 0).mean() if len(values) else np.nan),
+                    "CI_Lower": lower,
+                    "CI_Upper": upper,
+                    "CI_Excludes_Zero": (lower > 0 or upper < 0),
                 }
             )
 
@@ -508,88 +311,177 @@ def summarize_run_response(
 # ---------------------------------------------------------------------
 
 
-def summarize_prospective_market_movement(
+def build_prospective_market_movement(
     outcomes: pd.DataFrame,
-    horizons: tuple[int, ...] = (1, 2, 3, 5),
-    n_bootstrap: int = 5000,
-    seed: int = 42,
+    horizons: tuple[int, ...],
 ) -> pd.DataFrame:
     """
-    Test whether residual runs predict subsequent market movement.
+    Construct the event-level prospective market dataset.
 
-    WinProbMove is:
+    Crucially, market movement belongs to the FUTURE match.
 
-        closing win probability
-        minus
-        pre-closing win probability
+    Example:
 
-    Positive values therefore mean that the market became more
-    optimistic about the team's chance of winning.
+        Signal after Match 10
+        Future MatchAhead=1 = Match 11
 
-    This is prospective from the perspective of the run: the run is
-    formed entirely from earlier matches, while market movement belongs
-    to a future match.
+        Future_PreCloseWinProb
+        Future_CloseWinProb
+
+    are therefore the odds available before Match 11 and at its close.
+
+    No result from Match 11 is used to construct the movement itself.
     """
 
-    rows = []
+    df = outcomes.copy()
 
-    cluster_cols = [
+    df = df[df["MatchAhead"].isin(horizons)].copy()
+
+    df = df[
+        df["Future_PreCloseWinProb"].notna() & df["Future_CloseWinProb"].notna()
+    ].copy()
+
+    # ---------------------------------------------------------------
+    # Probability movement
+    # ---------------------------------------------------------------
+
+    df["WinProbMove"] = df["Future_CloseWinProb"] - df["Future_PreCloseWinProb"]
+
+    df["DrawProbMove"] = df["Future_CloseDrawProb"] - df["Future_PreCloseDrawProb"]
+
+    df["LossProbMove"] = df["Future_CloseLossProb"] - df["Future_PreCloseLossProb"]
+
+    # ---------------------------------------------------------------
+    # Absolute movement
+    # ---------------------------------------------------------------
+
+    df["AbsWinProbMove"] = df["WinProbMove"].abs()
+    df["AbsDrawProbMove"] = df["DrawProbMove"].abs()
+    df["AbsLossProbMove"] = df["LossProbMove"].abs()
+
+    df["TotalMarketMovement"] = (
+        df["AbsWinProbMove"] + df["AbsDrawProbMove"] + df["AbsLossProbMove"]
+    )
+
+    # ---------------------------------------------------------------
+    # Direction relative to signal
+    #
+    # Positive signal:
+    #   Did the market subsequently become MORE positive?
+    #
+    # Negative signal:
+    #   Did the market subsequently become LESS negative?
+    # ---------------------------------------------------------------
+
+    df["SignalAlignedWinMove"] = np.where(
+        df["RunSignal"] == "positive",
+        df["WinProbMove"],
+        -df["WinProbMove"],
+    )
+
+    df["MarketMovedTowardSignal"] = df["SignalAlignedWinMove"] > 0
+
+    # ---------------------------------------------------------------
+    # Keep useful columns only
+    # ---------------------------------------------------------------
+
+    columns = [
         "League",
         "Season",
         "Team",
+        "Opponent",
+        "Venue",
+        "SignalMatch",
+        "MatchAhead",
+        "RunSignal",
+        "Future_Match",
+        "Future_Date",
+        "Future_PreCloseWinProb",
+        "Future_CloseWinProb",
+        "WinProbMove",
+        "Future_PreCloseDrawProb",
+        "Future_CloseDrawProb",
+        "DrawProbMove",
+        "Future_PreCloseLossProb",
+        "Future_CloseLossProb",
+        "LossProbMove",
+        "AbsWinProbMove",
+        "AbsDrawProbMove",
+        "AbsLossProbMove",
+        "TotalMarketMovement",
+        "SignalAlignedWinMove",
+        "MarketMovedTowardSignal",
+        # Outcome is retained for later value analysis,
+        # but was NOT used to calculate movement.
+        "Future_ActualPoints",
+        "Future_Residual",
+        "Future_GoalDifference",
     ]
 
-    for signal in [
-        "positive",
-        "negative",
-    ]:
+    columns = [column for column in columns if column in df.columns]
 
-        subset = outcomes[outcomes["RunSignal"] == signal]
+    return (
+        df[columns]
+        .sort_values(
+            [
+                "League",
+                "Season",
+                "Team",
+                "SignalMatch",
+                "MatchAhead",
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+
+def summarize_prospective_market_movement(
+    outcomes: pd.DataFrame,
+    horizons: tuple[int, ...],
+    n_bootstrap: int = 5000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Summarise prospective market movement."""
+
+    movement = build_prospective_market_movement(
+        outcomes,
+        horizons,
+    )
+
+    rows = []
+
+    for signal in ["positive", "negative"]:
 
         for horizon in horizons:
 
-            movement_column = f"MatchAhead_{horizon}_WinProbMove"
+            subset = movement[
+                (movement["RunSignal"] == signal) & (movement["MatchAhead"] == horizon)
+            ].copy()
 
-            residual_column = f"MatchAhead_{horizon}_Residual"
+            values = subset["WinProbMove"]
 
-            valid = subset.dropna(
-                subset=[
-                    movement_column,
-                    residual_column,
-                ]
-            ).copy()
-
-            if valid.empty:
-                continue
-
-            cluster_means = valid.groupby(
-                cluster_cols,
-                sort=False,
-            )[movement_column].mean()
-
-            ci_lower, ci_upper = bootstrap_cluster_mean_ci(
-                valid,
-                movement_column,
-                cluster_cols,
+            lower, upper = bootstrap_mean_ci(
+                values,
                 n_bootstrap=n_bootstrap,
                 seed=seed,
             )
-
-            correlation = valid[movement_column].corr(valid[residual_column])
 
             rows.append(
                 {
                     "RunSignal": signal,
                     "MatchAhead": horizon,
-                    "N": len(valid),
-                    "TeamSeasons": len(cluster_means),
-                    "MeanWinProbMove": valid[movement_column].mean(),
-                    "TeamSeasonMeanWinProbMove": (cluster_means.mean()),
-                    "MeanAbsWinProbMove": valid[movement_column].abs().mean(),
-                    "CorrelationWithResidual": (correlation),
-                    "CI_Lower": ci_lower,
-                    "CI_Upper": ci_upper,
-                    "CI_Excludes_Zero": (ci_lower > 0 or ci_upper < 0),
+                    "N": len(subset),
+                    "TeamSeasons": (
+                        subset[["League", "Season", "Team"]].drop_duplicates().shape[0]
+                    ),
+                    "MeanWinProbMove": values.mean(),
+                    "MedianWinProbMove": values.median(),
+                    "MeanAbsWinProbMove": (values.abs().mean()),
+                    "MeanTotalMarketMovement": (subset["TotalMarketMovement"].mean()),
+                    "PctMovedTowardSignal": (subset["MarketMovedTowardSignal"].mean()),
+                    "CI_Lower": lower,
+                    "CI_Upper": upper,
+                    "CI_Excludes_Zero": (lower > 0 or upper < 0),
                 }
             )
 
@@ -597,156 +489,43 @@ def summarize_prospective_market_movement(
 
 
 # ---------------------------------------------------------------------
-# Prospective market movement dataset
-# ---------------------------------------------------------------------
-
-
-def build_prospective_market_movement(
-    outcomes: pd.DataFrame,
-    horizons: tuple[int, ...] = (1, 2, 3, 5),
-) -> pd.DataFrame:
-    """
-    Create a match-level dataset containing future market movement.
-
-    This is the main dataset to use when looking for characteristics
-    associated with teams whose future odds subsequently move.
-    """
-
-    rows = []
-
-    base_columns = [
-        "League",
-        "Season",
-        "Team",
-        "RunID",
-        "RunSignal",
-        "StartMatch",
-        "EndMatch",
-        "Length",
-        "EntrySignal",
-        "MeanSignal",
-        "PeakSignal",
-    ]
-
-    for horizon in horizons:
-
-        columns = {
-            "PreCloseWinProb": (f"MatchAhead_{horizon}_" "PreCloseWinProb"),
-            "CloseWinProb": (f"MatchAhead_{horizon}_" "CloseWinProb"),
-            "WinProbMove": (f"MatchAhead_{horizon}_" "WinProbMove"),
-            "Residual": (f"MatchAhead_{horizon}_" "Residual"),
-        }
-
-        available = (
-            outcomes[base_columns + list(columns.values())]
-            .dropna(subset=list(columns.values()))
-            .copy()
-        )
-
-        if available.empty:
-            continue
-
-        available = available.rename(
-            columns={value: key for key, value in columns.items()}
-        )
-
-        available["MatchAhead"] = horizon
-
-        rows.append(available)
-
-    if not rows:
-        return pd.DataFrame()
-
-    return (
-        pd.concat(
-            rows,
-            ignore_index=True,
-        )
-        .sort_values(
-            [
-                "MatchAhead",
-                "RunSignal",
-                "League",
-                "Season",
-                "Team",
-                "EndMatch",
-            ]
-        )
-        .reset_index(drop=True)
-    )
-
-
-# ---------------------------------------------------------------------
-# Team-season aggregation
+# Team-season analysis
 # ---------------------------------------------------------------------
 
 
 def aggregate_team_seasons(
     outcomes: pd.DataFrame,
-    horizons: tuple[int, ...] = (1, 2, 3, 5),
     min_runs: int = 3,
 ) -> pd.DataFrame:
-    """
-    Aggregate future residuals to team-season level.
+    """Aggregate future residual response by team-season."""
 
-    A team-season must have at least min_runs observations.
-    """
+    valid = outcomes[
+        outcomes["Future_Residual"].notna() & outcomes["RunSignal"].notna()
+    ].copy()
 
-    rows = []
-
-    group_cols = [
-        "League",
-        "Season",
-        "Team",
-        "RunSignal",
-    ]
-
-    for horizon in horizons:
-
-        column = f"MatchAhead_{horizon}_Residual"
-
-        valid = outcomes.dropna(subset=[column])
-
-        if valid.empty:
-            continue
-
-        grouped = (
-            valid.groupby(
-                group_cols,
-                sort=False,
-            )[column]
-            .agg(
-                Runs="count",
-                MeanResidual="mean",
-                MedianResidual="median",
-                PositiveRate=lambda x: (x > 0).mean(),
-            )
-            .reset_index()
-        )
-
-        grouped = grouped[grouped["Runs"] >= min_runs].copy()
-
-        grouped["MatchAhead"] = horizon
-
-        rows.append(grouped)
-
-    if not rows:
-        return pd.DataFrame()
+    grouped = valid.groupby(
+        [
+            "League",
+            "Season",
+            "Team",
+            "RunSignal",
+        ],
+        as_index=False,
+    ).agg(
+        Runs=("SignalMatch", "nunique"),
+        MeanResidual=("Future_Residual", "mean"),
+        MedianResidual=("Future_Residual", "median"),
+        PositiveRate=(
+            "Future_Residual",
+            lambda x: (x > 0).mean(),
+        ),
+    )
 
     return (
-        pd.concat(
-            rows,
-            ignore_index=True,
-        )
+        grouped[grouped["Runs"] >= min_runs]
         .sort_values(
-            [
-                "MatchAhead",
-                "MeanResidual",
-            ],
-            ascending=[
-                True,
-                False,
-            ],
+            "MeanResidual",
+            ascending=False,
         )
         .reset_index(drop=True)
     )
@@ -761,20 +540,25 @@ def run_parameter_grid(
     df: pd.DataFrame,
     windows: tuple[int, ...],
     thresholds: tuple[float, ...],
-    horizons: tuple[int, ...] = (1, 2, 3, 5),
+    horizons: tuple[int, ...],
     n_bootstrap: int = 5000,
     seed: int = 42,
 ) -> pd.DataFrame:
-    """Test robustness across run definitions."""
+    """
+    Test whether the residual effect depends materially on the
+    signal definition.
+
+    The output is intentionally compact.
+    """
 
     rows = []
 
     for window in windows:
 
-        mean_column = f"ResidualMean_{window}"
+        column = f"RollingResidual_{window}"
 
-        if mean_column not in df.columns:
-            raise ValueError(f"{mean_column} not found.")
+        if column not in df.columns:
+            continue
 
         for threshold in thresholds:
 
@@ -789,60 +573,48 @@ def run_parameter_grid(
                 window=window,
             )
 
+            if runs.empty:
+                continue
+
             outcomes = measure_run_outcomes(
                 signalled,
                 runs,
                 horizons=horizons,
             )
 
-            response = summarize_run_response(
-                outcomes,
-                horizons=horizons,
-                n_bootstrap=n_bootstrap,
-                seed=seed,
-            )
+            for signal in ["positive", "negative"]:
 
-            if response.empty:
-                continue
+                for horizon in horizons:
 
-            response = response.copy()
+                    subset = outcomes[
+                        (outcomes["RunSignal"] == signal)
+                        & (outcomes["MatchAhead"] == horizon)
+                        & outcomes["Future_Residual"].notna()
+                    ]
 
-            response["Window"] = window
-            response["Threshold"] = threshold
+                    values = subset["Future_Residual"]
 
-            rows.append(response)
+                    if values.empty:
+                        continue
 
-    if not rows:
-        return pd.DataFrame()
+                    lower, upper = bootstrap_mean_ci(
+                        values,
+                        n_bootstrap=n_bootstrap,
+                        seed=seed,
+                    )
 
-    return (
-        pd.concat(
-            rows,
-            ignore_index=True,
-        )[
-            [
-                "Window",
-                "Threshold",
-                "RunSignal",
-                "MatchAhead",
-                "N",
-                "TeamSeasons",
-                "MeanResidual",
-                "TeamSeasonMean",
-                "MedianResidual",
-                "Positive_%",
-                "CI_Lower",
-                "CI_Upper",
-                "CI_Excludes_Zero",
-            ]
-        ]
-        .sort_values(
-            [
-                "MatchAhead",
-                "RunSignal",
-                "Window",
-                "Threshold",
-            ]
-        )
-        .reset_index(drop=True)
-    )
+                    rows.append(
+                        {
+                            "Window": window,
+                            "Threshold": threshold,
+                            "RunSignal": signal,
+                            "MatchAhead": horizon,
+                            "N": len(values),
+                            "MeanResidual": values.mean(),
+                            "CI_Lower": lower,
+                            "CI_Upper": upper,
+                            "CI_Excludes_Zero": (lower > 0 or upper < 0),
+                        }
+                    )
+
+    return pd.DataFrame(rows)
